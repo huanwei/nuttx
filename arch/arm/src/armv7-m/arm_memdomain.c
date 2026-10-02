@@ -56,6 +56,7 @@ static int g_own_region  = -1;   /* 本任务块：user RW（高优先级） */
  */
 
 static pid_t g_supervisor = -1;
+static bool  g_supervisor_pinned;
 static struct ort_faultrec_s g_lastfault;
 
 /****************************************************************************
@@ -178,42 +179,78 @@ int ort_container_bind(pid_t pid, int domain)
  * Name: ort_supervisor_set
  *
  * Description:
- *   注册 ORT 监督者。只接受首次注册。
+ *   注册 ORT 监督者。**首次注册即钉住**。
  *
- *   ⚠️ 原型期任何任务都能注册 —— 正式实现应只允许 ORT 启动器指定的
- *      那个任务（凭据 / 启动参数），否则恶意的「先注册者」可以顶掉
- *      真正的监督者。
+ *   钉住之后只有同一个任务能重复注册（幂等），其它一律 -EBUSY，
+ *   无论原监督者是否还活着。
+ *
+ *   ⚠️ 仍缺的一环：**谁有资格做"首次注册"**。
+ *      当前是"先到先得"，在 ORT 的架构里够用（监督者在创建任何容器
+ *      之前就注册了，此时系统里只有它），但这是**依赖启动顺序**而非
+ *      强制约束。正式实现应把资格绑定到 ORT 启动器指定的那个任务
+ *      （构建配置 + 凭据），见 patches/nuttx/README.md 的欠账。
  *
  ****************************************************************************/
 
 int ort_supervisor_set(pid_t pid)
 {
-  if (g_supervisor >= 0 && g_supervisor != pid)
+  if (g_supervisor_pinned)
     {
-      /* 已有监督者。只有在它**已经不存在**时才允许接管 ——
+      /* ★ 已钉住：只接受**同一个任务**的重复注册（幂等），
+       *   其它任务一律拒绝 —— **无论原监督者是否还活着**。
        *
-       * 为什么需要接管：槽位只在「故障通知失败（ESRCH）」时才清。
-       * 监督者正常退出后、下一次故障发生前，槽位一直是脏的，
-       * 若不接管，重启监督者会一直拿到 -EBUSY。
+       * 为什么不能"原监督者没了就允许接管"：
+       *   那等于把"谁能当监督者"变成运行期竞争。任何任务只要等到
+       *   监督者退出（或干脆把它耗死）就能补位，从而接管：
+       *     - 故障通知的收件人（瞎掉真监督者）
+       *     - 容器的域分配权（PR_SET_ORT_DOMAIN）
+       *   安全动作绝不能依赖被管理者的善意 —— 这是公理 S1。
        *
-       * ⚠️ 原型期局限：按 pid 判存活，pid 被复用时会误判为「还活着」。
-       *    正式实现应持有 TCB/group 引用而不是裸 pid。
+       * 监督者退出是**灾难性事件**，不是"换个任务继续"的场景：
+       *   它意味着降级能力没了。此时系统应当由独立的看门狗判定，
+       *   而不是让内核把槽位空出来等人抢。
        */
 
-      if (nxsched_get_tcb(g_supervisor) != NULL)
+      if (pid == g_supervisor)
         {
-          return -EBUSY;
+          return OK;
         }
 
-      _alert("ORT: stale supervisor %d -> taken over by %d\n",
-             g_supervisor, pid);
+      _alert("ORT: supervisor slot is pinned to pid=%d, "
+             "rejecting pid=%d\n", g_supervisor, pid);
+      return -EBUSY;
     }
 
-  g_supervisor = pid;
-  syslog(LOG_INFO, "[ORT] supervisor registered: pid=%d sig=%d\n",
+  g_supervisor        = pid;
+  g_supervisor_pinned = true;
+
+  syslog(LOG_INFO, "[ORT] supervisor pinned: pid=%d sig=%d\n",
          pid, ORT_SIGFAULT);
   return OK;
 }
+
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+/****************************************************************************
+ * Name: ort_supervisor_reset
+ *
+ * Description:
+ *   释放监督者槽位。⚠️ 仅原型测试用，见 sched/Kconfig 的说明。
+ *
+ *   正式产品必须关闭 CONFIG_ORT_SUPERVISOR_RESET ——
+ *   否则这个接口本身就是"任何任务都能顶掉监督者"的后门。
+ *
+ ****************************************************************************/
+
+int ort_supervisor_reset(void)
+{
+  _alert("ORT: supervisor slot reset by pid=%d "
+         "(PROTOTYPE ONLY — 正式构建不应存在此路径)\n",
+         nxsched_self()->pid);
+  g_supervisor        = -1;
+  g_supervisor_pinned = false;
+  return OK;
+}
+#endif
 
 /****************************************************************************
  * Name: ort_fault_notify
@@ -249,6 +286,10 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
       return;
     }
 
+  /* 注意：这里不检查 g_supervisor_pinned —— 槽位非空就意味着已钉住，
+   * 只需看是否需要通知。
+   */
+
   value.sival_int = (int)victim;
 
   ret = nxsig_queue(g_supervisor, ORT_SIGFAULT, value);
@@ -258,28 +299,18 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
        * 但要在日志里留下痕迹，否则监督者会「静默失明」。
        */
 
-      if (ret == -ESRCH)
-        {
-          /* 监督者已经不存在了 → 注销。
-           *
-           * 为什么要报警而不是静默注销：监督者没了意味着**降级能力没了**，
-           * 此后所有容器故障都不会有人处理。这在产品里是必须上抛的事件，
-           * 不是可以顺带忽略的小事。
-           */
+      /* ★ 不清槽。
+       *
+       * 槽位保持钉住，后续每次故障都会再报一次 —— 这不是刷屏，
+       * 而是**持续暴露降级能力已经失效**这个事实。
+       * 清槽会让下一个注册者补位，把一个安全事件变成一次接管机会。
+       *
+       * 通知失败不能影响隔离动作本身：容器的终止流程必须继续走完
+       * （终止权在内核手里，不依赖监督者）。
+       */
 
-          _alert("ORT: supervisor %d is gone -> deregistering "
-                 "(降级能力已失效)\n", g_supervisor);
-          g_supervisor = -1;
-        }
-      else
-        {
-          /* 通知失败不能影响隔离动作本身 —— 终止流程必须继续走完。
-           * 但要在日志里留下痕迹，否则监督者会「静默失明」。
-           */
-
-          _alert("ORT: fault notify to supervisor %d failed: %d\n",
-                 g_supervisor, ret);
-        }
+      _alert("ORT: fault notify to supervisor %d failed: %d "
+             "(降级能力失效，槽位保持钉住)\n", g_supervisor, ret);
     }
 }
 

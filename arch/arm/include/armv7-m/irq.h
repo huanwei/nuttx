@@ -572,6 +572,9 @@ EXTERN int ort_container_domain(FAR struct task_group_s *group);
 struct ort_faultrec_s;
 
 EXTERN int  ort_supervisor_set(pid_t pid);
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+EXTERN int  ort_supervisor_reset(void);
+#endif
 EXTERN void ort_fault_record(FAR struct ort_faultrec_s *rec);
 #endif
 

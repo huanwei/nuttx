@@ -100,6 +100,17 @@ int prctl(int option, ...)
           return ort_container_domain(this_task()->group);
         }
 
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+      case PR_ORT_SUPERVISOR_RESET:
+        {
+          /* [ORT] ⚠️ 仅原型测试：释放监督者槽位。
+           * 正式构建里本分支不存在（见 sched/Kconfig）。
+           */
+
+          return ort_supervisor_reset();
+        }
+#endif
+
       case PR_SET_ORT_SUPERVISOR:
         {
           /* [ORT] 把自己注册为监督者：内核在容器故障时通知它。

@@ -112,6 +112,18 @@
  */
 #define PR_SET_ORT_SUPERVISOR 8
 
+/* [ORT] 释放监督者槽位（⚠️ 仅原型测试，需 CONFIG_ORT_SUPERVISOR_RESET）
+ *
+ *   prctl(PR_ORT_SUPERVISOR_RESET);
+ *
+ * 监督者槽位是**钉住**的：一旦注册，别的任务永远不能接管 ——
+ * 否则"谁能当监督者"就成了运行期竞争。
+ *
+ * 正式产品必须关闭该配置项：复位应当走「授权复位」
+ * （《降级状态机设计》§2.1），而不是一个任何任务都能调的 prctl。
+ */
+#define PR_ORT_SUPERVISOR_RESET 11
+
 /* [ORT] 读取最近一次容器故障记录（prototype）
  *
  *   struct ort_faultrec_s rec;

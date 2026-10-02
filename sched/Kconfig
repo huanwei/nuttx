@@ -2115,6 +2115,27 @@ endchoice
 
 endif # HRTIMER
 
+if ORT_CONTAINER
+
+config ORT_SUPERVISOR_RESET
+	bool "Allow runtime reset of the ORT supervisor slot (PROTOTYPE ONLY)"
+	default n
+	---help---
+		[ORT] ⚠️ 仅供原型测试：允许运行期释放监督者槽位。
+
+		ORT 的监督者槽位是**钉住**的 —— 一旦注册就不允许别的任务接管，
+		否则"谁能当监督者"就变成了运行期竞争，而安全动作绝不能依赖
+		被管理者的善意。
+
+		但这个语义让自动化测试无法连续跑多轮（每轮都要重新注册）。
+		本开关提供一个显式的复位接口用于测试。
+
+		★ 正式产品**必须关闭本选项**。复位应走"授权复位"
+		  （《降级状态机设计》§2.1：经鉴权的操作员复位 / 断电重启），
+		  而不是一个任何任务都能调的 prctl。
+
+endif # ORT_CONTAINER
+
 menuconfig ORT_CONTAINER
 	bool "[ORT] Container resource binding (prototype)"
 	default n
