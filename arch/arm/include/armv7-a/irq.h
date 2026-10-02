@@ -515,4 +515,18 @@ extern "C"
 #endif
 #endif /* __ASSEMBLY__ */
 
+/* [ORT] 容器/域/监督者/能力位接口
+ *
+ * ★ armv7-m / armv8-m 一直有这个 include，armv7-a 漏了。
+ *   后果不是"编译不过"，而是 sched/task/task_prctl.c 里六个 ORT 调用
+ *   全部退化成**隐式声明**（编译器当作 int f()）——
+ *   arity、参数类型、返回类型统统不检查，而且只出 warning。
+ *   实测：切到 ORT-A 时 prctl.c 一次报 6 条 implicit-declaration。
+ *
+ *   这跟之前 arm_dataabort.c 里 ort_handle_user_fault() 的隐式声明
+ *   是**同一类错误**：跨模块接口少一行 include，静默降级。
+ */
+
+#include <arch/arm_ort.h>
+
 #endif /* __ARCH_ARM_INCLUDE_ARMV7_A_IRQ_H */

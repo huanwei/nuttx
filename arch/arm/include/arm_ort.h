@@ -56,6 +56,26 @@ int ort_supervisor_reset(void);
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
+/* 本平台上 ORT 能提供哪些能力（ORT_CAP_* 位掩码）。
+ *
+ * ★ 为什么必须有这个东西：
+ *
+ *   ORT 的两个 SKU 在「容器能不能自己处理故障」上有**真实的能力差异**，
+ *   而这个差异此前是**隐式**的 —— 同一份 manifest、同一个容器，
+ *   在 ORT-M 上注册 SIGSEGV 处理器能收到通知，在 ORT-A 上却会被
+ *   直接跳过、静默升级到 SIGKILL。部署方看到的是"两个 SKU 行为不同"，
+ *   却没有任何地方能问出这件事。
+ *
+ *   与其让它隐式发生，不如让监督者在**准入**时就问清楚：
+ *   容器声明了故障处理器而平台不支持 → 拒绝准入，而不是默默降级。
+ *
+ *   所以这个函数返回的必须是**实际被强制执行的行为**，
+ *   不是"理论上想支持的行为" —— 它由各 arch 端口申报，
+ *   因为约束就长在那边。
+ */
+
+uint32_t ort_caps(void);
+
 #endif /* __ASSEMBLY__ */
 #endif /* CONFIG_ORT_CONTAINER */
 #endif /* __ARCH_ARM_INCLUDE_ARM_ORT_H */

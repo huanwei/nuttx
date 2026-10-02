@@ -83,6 +83,30 @@ static void ort_memdomain_lazyinit(void)
  * Public Functions
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: ort_caps
+ *
+ * Description:
+ *   申报本平台**实际强制执行**的 ORT 能力位。
+ *
+ *   与 armv7-m 同：ARMv8-M 这边也是 MPC + CONFIG_BUILD_PROTECTED，
+ *   用户栈是内核堆里的一块内存，终止路径释放它时页表不动 ——
+ *   所以容器注册的故障处理器可以被安全地调用。
+ *   详细论证见 arch/arm/src/armv7-m/arm_memdomain.c 里的 ort_caps()。
+ *
+ *   ⚠️ 验证状态：mps3-an547 上的 handler / ignore / handler-ret
+ *      只在 H31 之前跑过（手册 §"验证结果（mps3-an547）"），
+ *      **尚未**按 §三·补十三 的判据复验。机制与 armv7-m 相同、
+ *      决定因素是 PROTECTED 而非 M7/M55，所以这里先按同值申报 ——
+ *      但这条是**推理**不是实测，复验时一并确认。
+ *
+ ****************************************************************************/
+
+uint32_t ort_caps(void)
+{
+  return ORT_CAP_FAULT_HANDLER;
+}
+
 int ort_container_domain(FAR struct task_group_s *group)
 {
   if (group == NULL || !ORT_DOMAIN_VALID(group->tg_ort_domain))

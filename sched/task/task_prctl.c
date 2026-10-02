@@ -134,6 +134,21 @@ int prctl(int option, ...)
 
           return ort_fault_read(rec);
         }
+
+      case PR_GET_ORT_CAPS:
+        {
+          /* [ORT] 本平台的能力位。直接返回掩码，不碰用户指针。
+           *
+           * 存在的理由：两个 SKU 的能力差异此前是**隐式**的 ——
+           * 同一份 manifest 在两个 SKU 上行为不同，却没地方问。
+           * 有了它，监督者就能在**准入**阶段拒绝一个自己兑现不了的
+           * 声明，而不是等运行期默默降级。
+           *
+           * 具体有哪些位、每个位的确切含义，见 <sys/prctl.h>。
+           */
+
+          return (int)ort_caps();
+        }
 #endif
 
       case PR_SET_NAME:
