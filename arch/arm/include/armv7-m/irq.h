@@ -250,9 +250,14 @@ struct xcptcontext
   uint32_t *regs;
 
 #ifdef CONFIG_ORT_MEMDOMAIN
-  /* [ORT] Per-task MPU memory domain id (-1 = none).
+  /* [ORT] 绑定的 MPU 内存域。
    *
-   * 由上下文切换钩子 ort_memdomain_switch() 读取，用于编程 MPU region。
+   *   0      = 未绑定（TCB 由 kmm_zalloc()/memset(0) 分配，这是天然的初值）
+   *   n (>0) = 域 (n - 1)
+   *
+   * 编码细节见 arch/arm/src/armv7-m/arm_memdomain.h；外部一律通过
+   * ort_memdomain_bind() 写入，由 ort_memdomain_switch() 读取。
+   *
    * 放在这里而非 tcb_s：这是 ARMv7-M MPU 的架构相关概念。
    */
 
@@ -545,6 +550,24 @@ extern "C"
 {
 #else
 #define EXTERN extern
+#endif
+
+#ifdef CONFIG_ORT_MEMDOMAIN
+struct tcb_s;
+
+/* [ORT] 域绑定接口。
+ *
+ * 为什么放在这里而不是 arch/arm/src/armv7-m/arm_memdomain.h：
+ *   sched/task/task_prctl.c 需要调用它，但 sched/ 不应该 include
+ *   arch/src 下的私有头文件。声明跟着字段（xcp.domain_id）走，
+ *   实现在 arch/arm/src/armv7-m/arm_memdomain.c。
+ *
+ * 为什么用函数而不是让调用方直接写字段：
+ *   「未绑定」的编码方式（0）是 arm_memdomain.c 的私有约定，
+ *   暴露给 sched/ 只会多一个漏改的地方。
+ */
+
+EXTERN void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain);
 #endif
 
 #undef EXTERN

@@ -73,15 +73,14 @@ int prctl(int option, ...)
       case PR_SET_ORT_DOMAIN:
         {
           /* [ORT] 把调用任务绑定到指定域。
-           * 参数：int domain_id（-1 = 解除绑定）
-           * 返回值：0 成功 / -EINVAL 域号越界
+           * 参数：int domain（< 0 = 解除绑定）
+           * 返回值：0 成功
+           *
+           * 越界一律降级为「解除绑定」，由 ort_memdomain_bind() 统一处理 ——
+           * sched/ 不需要知道「未绑定」是怎么编码的，也不需要知道域有几种。
            */
 
-          /* 只负责设值；越界校验在 ort_memdomain_switch() 里做，
-           * 避免 sched/ 依赖 arch/ 的头文件。
-           */
-
-          this_task()->xcp.domain_id = va_arg(ap, int);
+          ort_memdomain_bind(this_task(), va_arg(ap, int));
           return OK;
         }
 #endif

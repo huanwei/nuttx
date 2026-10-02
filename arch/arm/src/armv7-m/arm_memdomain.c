@@ -80,36 +80,62 @@ static void ort_memdomain_lazyinit(void)
  * Public Functions
  ****************************************************************************/
 
+void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain)
+{
+  if (tcb == NULL)
+    {
+      return;
+    }
+
+  /* 越界 → 视为解除绑定（拒绝访问，而不是给出错误映射） */
+
+  if (domain < 0 || domain >= ORT_DOMAIN_COUNT)
+    {
+      tcb->xcp.domain_id = ORT_DOMAIN_UNBOUND;
+    }
+  else
+    {
+      tcb->xcp.domain_id = ORT_DOMAIN_ENCODE(domain);
+    }
+}
+
 void ort_memdomain_switch(FAR struct tcb_s *to)
 {
   uintptr_t base;
   int domain;
+  int bound;
 
   if (g_own_region < 0)
     {
       ort_memdomain_lazyinit();
     }
 
-  /* 原型阶段的域分配策略：按 pid 取模。
+  /* 原型阶段的绑定方式：任务自己 prctl(PR_SET_ORT_DOMAIN)。
    *
-   * ⚠️ 这只是为了「让不同任务拿到不同块」以便观察 region 重编程，
-   *    不是最终策略。正式实现应由 ContainerGroup 显式绑定。
+   * ⚠️ 正式实现应由 ORT 监督者把域绑到 ContainerGroup（task_group_s），
+   *    而不是让容器自己申报 —— 容器能自己申报就能自己越权。
    */
 
-  domain = to ? to->xcp.domain_id : ORT_DOMAIN_NONE;
+  bound = to != NULL ? to->xcp.domain_id : ORT_DOMAIN_UNBOUND;
 
-  /* 越界视为「无域」（更安全：拒绝访问而不是给出错误映射） */
+  /* ★ 默认拒绝：未绑定 / 越界 → 不给任何域块。
+   *
+   *   这里必须用 ORT_DOMAIN_VALID() 而不是「domain >= 0」——
+   *   xcp.domain_id 是 BSS 清零的，未绑定的任务天然是 0，
+   *   一旦按「域 0」解释就会 fail-open（实测踩过，见 H28）。
+   */
 
-  if (domain < 0 || domain >= ORT_DOMAIN_COUNT)
+  if (!ORT_DOMAIN_VALID(bound))
     {
-      /* 无域：把 own region 缩到最小并禁止访问 */
+      /* 未绑定：把 own region 缩到最小并禁止访问 */
 
       mpu_modify_region((unsigned int)g_own_region,
                         ORT_DOMAIN_POOL_BASE, 32, ORT_FLAGS_DENY);
       return;
     }
 
-  base = ORT_DOMAIN_POOL_BASE + (uintptr_t)domain * ORT_DOMAIN_BLOCK_SIZE;
+  domain = ORT_DOMAIN_DECODE(bound);
+  base   = ORT_DOMAIN_POOL_BASE + (uintptr_t)domain * ORT_DOMAIN_BLOCK_SIZE;
 
   /* ★ 关键动作：把 incoming 任务的域块编成 user-RW。
    *   池 region 保持 no-access，二者重叠时高编号（own）胜出。
@@ -117,7 +143,6 @@ void ort_memdomain_switch(FAR struct tcb_s *to)
 
   mpu_modify_region((unsigned int)g_own_region,
                     base, ORT_DOMAIN_BLOCK_SIZE, ORT_FLAGS_ALLOW);
-
 }
 
 

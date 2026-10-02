@@ -32,6 +32,9 @@
 
 #include <arch/irq.h>
 #ifdef CONFIG_BUILD_PROTECTED
+#  include <signal.h>
+#  include <nuttx/sched.h>
+#  include <nuttx/signal.h>
 #  include <nuttx/userspace.h>
 #endif
 
@@ -156,20 +159,65 @@ int arm_memfault(int irq, void *context, void *arg)
 
       if (pc >= USERSPACE->us_textstart && pc < USERSPACE->us_textend)
         {
-          _alert("ORT: USER TASK MEMFAULT pc=%08" PRIxPTR
-                 " addr=%08" PRIx32 " -> killing task\n",
-                 pc, getreg32(NVIC_MEMMANAGE_ADDR));
+          FAR struct tcb_s *ftcb = nxsched_self();
+          int ret = -ESRCH;
+
+          _alert("ORT: USER TASK MEMFAULT pid=%d pc=%08" PRIxPTR
+                 " addr=%08" PRIx32 " -> terminate task\n",
+                 ftcb != NULL ? ftcb->pid : -1, pc,
+                 getreg32(NVIC_MEMMANAGE_ADDR));
+
+          /* 先清 fault 状态，避免异常返回时重新触发同一个 fault */
 
           putreg32(0xff, NVIC_CFAULTS);
           putreg32(0, NVIC_MEMMANAGE_ADDR);
 
-          /* 终止当前任务（内核内部接口，不返回）。
-           * 不用 exit()：那是 libc 的用户态入口，内核 pass 不链接它。
+          /* 投递 SIGSEGV 给故障任务。
+           *
+           * 为什么用信号而不是直接 nxtask_exit()：
+           *   1. 不能从异常处理器直接调用 nxtask_exit() —— 它期望在任务上下文执行，
+           *      在异常返回路径上调用会导致上下文切换无法完成（实测系统挂起）
+           *   2. 信号由 NuttX 在「返回用户态时」投递，时机正确
+           *   3. 应用可注册 SIGSEGV 处理器 —— 使「容器越界」成为可感知事件，
+           *      直接对接 ORT 降级状态机的 onFailure 策略
            */
 
-          extern int nxtask_exit(void);
-          nxtask_exit();
-          return OK; /* 不可达 */
+          if (ftcb != NULL)
+            {
+              ret = nxsig_kill(ftcb->pid, SIGSEGV);
+            }
+
+          /* ★ 不跳过 faulting 指令。
+           *
+           * 为什么「跳到下一条指令」是错的（实测踩过）：
+           *   nxsig_kill() → nxsig_queue_action() 一旦发现任务存在 SIGSEGV
+           *   动作，就会调用 up_schedule_sigaction() 触发 PendSV；PendSV 上
+           *   up_schedule_sigaction() 会把保存的上下文整体复制一份、把 PC 改写成
+           *   arm_sigdeliver。任务永远不会再回到这条 faulting 指令 ——
+           *   跳过指令不但多余，还会让任务带着被截断的状态继续跑。
+           *
+           *   另外，手工解码 Thumb 指令长度（16/32 位）本身就不可靠。
+           *
+           * 为什么必须校验 sigdeliver：
+           *   sigdeliver 只在任务确实存在 SIGSEGV 动作时才被设置：
+           *     - 应用自己 sigaction() 注册的处理器，或
+           *     - CONFIG_SIG_DEFAULT 提供的「异常终止」默认动作
+           *   两者都没有时（nxsig_queue_action() 会整段跳过），异常返回后任务
+           *   会在同一指令上立刻再次 fault，形成无限 fault 循环。
+           *   此时无法隔离该故障 → fail-stop，而不是假装没事继续跑。
+           */
+
+          if (ret < 0 || ftcb == NULL || ftcb->sigdeliver == NULL)
+            {
+              _alert("ORT: cannot terminate pid=%d (ret=%d) -> fail-stop\n",
+                     ftcb != NULL ? ftcb->pid : -1, ret);
+              up_irq_save();
+              PANIC_WITH_REGS("user memfault: undeliverable", context);
+            }
+
+          /* 正常异常返回 → PendSV → 信号投递 → 任务被终止（或应用自行处理） */
+
+          return OK;
         }
     }
 #endif
