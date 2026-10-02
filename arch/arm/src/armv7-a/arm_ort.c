@@ -134,8 +134,8 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
   fgroup = ftcb->group;
   faults = ++fgroup->tg_ort_faults;
 
-  _alert("ORT: USER FAULT pid=%d pc=%08" PRIxPTR " addr=%08" PRIxPTR
-         " -> terminate process\n", ftcb->pid, pc, addr);
+  _alert("ORT: USER FAULT pid=%d tgid=%d pc=%08" PRIxPTR " addr=%08" PRIxPTR
+         " -> terminate process\n", ftcb->pid, fgroup->tg_pid, pc, addr);
 
   /* ── 第零步：先通知监督者 ────────────────────────────────────────
    *
