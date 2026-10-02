@@ -180,9 +180,23 @@ static int ort_sig_kill(FAR struct tcb_s *ftcb, int signo)
   return ret;
 }
 
+/* 该信号投递出去是否**必然**由内核里的默认动作接手？
+
+ * 注意：为 true 才说明「不会有用户代码被执行」——
+ * 只有这种情况才允许在内核栈上就地投递（见 ort_sig_kill）。
+ */
+
+#  define ort_sig_isdefault(ftcb, signo) nxsig_isdefault((ftcb), (signo))
+
 #else
 
 #  define ort_sig_kill(ftcb, signo) nxsig_kill((ftcb)->pid, (signo))
+
+/* 没开 CONFIG_SIG_DEFAULT 时任何信号都没有默认动作，
+ * 一律按「可能落到用户处理器」处理 —— 保守但安全。
+ */
+
+#  define ort_sig_isdefault(ftcb, signo) false
 
 #endif /* CONFIG_SIG_DEFAULT */
 
@@ -306,9 +320,25 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
 
   ort_fault_notify(ftcb->pid, pc, addr, faults);
 
-  /* ── 第一步：投递 SIGSEGV，给进程/监督者一个可观测点 ────────────── */
+  /* ── 第一步：投递 SIGSEGV，给进程一个可观测点 ─────────────────────
+   *
+   * ★ 只对**没装自己的 SIGSEGV 处理器**的进程投。
+   *
+   *   原因不是策略洁癖，而是这条路在当前配置下走不通：
+   *   有用户处理器时，nxsig_queue_action() 只能选 up_schedule_sigaction()，
+   *   把控制权交给建立在**用户栈**上的 arm_sigdeliver trampoline ——
+   *   而 abort 向量恰恰把寄存器帧也建在用户栈上（SYS 栈 == 用户栈）。
+   *   实测：取指跳飞到 0x6、arm_undefinedinsn panic、整机复位。
+   *
+   *   换句话说：**硬件故障不可能安全地"交给进程自己处理"**，
+   *   这也正是 ORT 的立场 —— 容器的终止权在监督者/内核手里，
+   *   进程无权通过装个处理器来把内核拖下水。
+   *
+   *   没装处理器的进程（绝大多数）仍然拿到 SIGSEGV，
+   *   其默认动作就是终止 —— 那一步是安全的（见 ort_sig_kill）。
+   */
 
-  if (faults == 1)
+  if (faults == 1 && ort_sig_isdefault(ftcb, SIGSEGV))
     {
       ret = ort_sig_kill(ftcb, SIGSEGV);
     }
@@ -329,8 +359,8 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
 
   if (faults > 1 || ftcb->sigdeliver == NULL)
     {
-      _alert("ORT: escalating pid=%d to SIGKILL (faults=%" PRIu32 ")\n",
-             ftcb->pid, faults);
+      _alert("ORT: escalating pid=%d to SIGKILL (faults=%" PRIu32
+             ", sigdeliver=%p)\n", ftcb->pid, faults, ftcb->sigdeliver);
       ret = ort_sig_kill(ftcb, SIGKILL);
     }
 
