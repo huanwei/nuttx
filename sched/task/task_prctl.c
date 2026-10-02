@@ -122,7 +122,7 @@ int prctl(int option, ...)
 
       case PR_GET_ORT_FAULT:
         {
-          /* [ORT] 取回最近一次容器故障记录。
+          /* [ORT] 取下一条未读的容器故障事件（队列语义）。
            *
            * ⚠️ 原型期直接按用户指针写 —— PROTECTED 构建下内核能访问
            *    用户内存所以可行，但**没有做指针合法性校验**。
@@ -132,13 +132,7 @@ int prctl(int option, ...)
           FAR struct ort_faultrec_s *rec =
               (FAR struct ort_faultrec_s *)va_arg(ap, uintptr_t);
 
-          if (rec == NULL)
-            {
-              return -EINVAL;
-            }
-
-          ort_fault_record(rec);
-          return (int)rec->seq;
+          return ort_fault_read(rec);
         }
 #endif
 

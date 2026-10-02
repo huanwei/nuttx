@@ -124,12 +124,20 @@
  */
 #define PR_ORT_SUPERVISOR_RESET 11
 
-/* [ORT] 读取最近一次容器故障记录（prototype）
+/* [ORT] 取下一条未读的容器故障记录（prototype）
  *
  *   struct ort_faultrec_s rec;
- *   prctl(PR_GET_ORT_FAULT, &rec);
+ *   int n = prctl(PR_GET_ORT_FAULT, &rec);
+ *       n > 0  取到一条，n 是它的 seq
+ *       n == 0 暂无新事件
+ *       n < 0  错误（-EPERM = 调用者不是监督者）
  *
- * 返回值：本次读取到的记录的 seq；从未发生故障返回 0。
+ * ★ 是**队列**不是单槽：并发故障时单槽会丢事件、且无法把
+ *   "受害 pid"和"故障详情"正确配对。环形缓冲 16 条，
+ *   溢出丢最旧的，丢弃条数记在每条的 lost 字段里。
+ *
+ * ★ 只有监督者能读：故障记录是监督者的私有视图。
+ *   放开读会让容器能消费掉监督者的事件、或窥探别的容器的故障地址。
  */
 #define PR_GET_ORT_FAULT 9
 
@@ -157,7 +165,8 @@
 
 struct ort_faultrec_s
 {
-  uint32_t  seq;      /* 递增序号；0 = 从未发生故障 */
+  uint32_t  seq;      /* 递增序号；从 1 开始 */
+  uint32_t  lost;     /* 本条之前被丢弃的条数；0 = 无丢失 */
   int       victim;   /* 故障容器的 pid */
   uintptr_t pc;       /* 触发故障的指令地址 */
   uintptr_t addr;     /* 被非法访问的地址 */

@@ -57,7 +57,35 @@ static int g_own_region  = -1;   /* 本任务块：user RW（高优先级） */
 
 static pid_t g_supervisor = -1;
 static bool  g_supervisor_pinned;
-static struct ort_faultrec_s g_lastfault;
+
+/* ── 故障事件队列 ──────────────────────────────────────────────────────
+ *
+ * 为什么必须是队列而不是单槽：
+ *   单槽 + "记住最近一次 victim"的匹配方式在**并发故障**下会认错容器。
+ *   两个容器几乎同时失效时，监督者可能拿到 A 的受害 pid 却配 B 的详情，
+ *   或者干脆丢掉一条 —— 而它据此决定重启谁、要不要进安全态。
+ *
+ * 环形缓冲 + 单调序号：
+ *   seq   —— 事件序号（从 1 开始），监督者据此判断是否漏收
+ *   lost  —— 本条之前被丢弃的条数（0 = 无丢失）
+ *
+ *   lost 直接放在记录里而不是单独查询：监督者读到的每一条都自带
+ *   "我之前丢过多少"，不需要额外的状态查询接口，也不会漏判。
+ *
+ * 只有监督者能读（见 ort_fault_read）：故障记录是**监督者的私有视图**，
+ * 容器读不到 —— 否则容器可以消费掉监督者的事件，或者窥探别的容器的故障。
+ *
+ * 写入方是异常处理上下文（不可阻塞），所以这里只用最朴素的赋值，
+ * 不分配、不等待。生产者在 IRQ 上下文、消费者在任务上下文，
+ * 竞争窗口靠"读游标只在消费者侧推进"来约束。
+ */
+
+#define ORT_FAULTQ_SIZE  16
+
+static struct ort_faultrec_s g_faultq[ORT_FAULTQ_SIZE];
+static uint32_t g_faultq_total;     /* 产生的事件总数（= 最后一条的 seq） */
+static uint32_t g_faultq_read;      /* 已被监督者取走的条数 */
+static uint32_t g_faultq_dropped;   /* 累计丢弃条数 */
 
 /****************************************************************************
  * Private Functions
@@ -224,6 +252,22 @@ int ort_supervisor_set(pid_t pid)
   g_supervisor        = pid;
   g_supervisor_pinned = true;
 
+  /* ★ 新一任监督者上任 → 清空事件队列。
+   *
+   * 为什么：事件是属于**某一任监督者**的。上一任缺席期间积压的事件，
+   * 已经没有正确的处理者了 —— 那些容器早就被内核终止（终止权不依赖
+   * 监督者），没人会去重启它们，事件本身也失去了时效。
+   * 继续投递只会让新监督者基于陈旧信息做决策（实测踩过：
+   * 测试程序换一轮跑，前一轮残留的事件被当成新事件处理）。
+   *
+   * 生产环境里监督者在创建任何容器之前就注册，队列本来就是空的 ——
+   * 这个清理是防御性的。原型期它同时承担"新监督者 = 新任期"的语义。
+   */
+
+  g_faultq_total   = 0;
+  g_faultq_read    = 0;
+  g_faultq_dropped = 0;
+
   syslog(LOG_INFO, "[ORT] supervisor pinned: pid=%d sig=%d\n",
          pid, ORT_SIGFAULT);
   return OK;
@@ -273,11 +317,35 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
   union sigval value;
   int ret;
 
-  g_lastfault.seq++;
-  g_lastfault.victim = victim;
-  g_lastfault.pc     = pc;
-  g_lastfault.addr   = addr;
-  g_lastfault.faults = faults;
+  /* 入队。先算 lost，再写槽位。 */
+
+  {
+    uint32_t pending = g_faultq_total - g_faultq_read;
+    uint32_t slot;
+
+    if (pending >= ORT_FAULTQ_SIZE)
+      {
+        /* 队列满 —— 丢掉**最旧的**一条，并推进读游标。
+         *
+         * 为什么丢最旧的而不是拒绝新的：监督者要处理的是"现在出了什么事"，
+         * 陈旧事件的价值最低。丢新的会让监督者永远滞后。
+         */
+
+        g_faultq_read++;
+        g_faultq_dropped++;
+      }
+
+    slot = g_faultq_total % ORT_FAULTQ_SIZE;
+
+    g_faultq_total++;
+
+    g_faultq[slot].seq    = g_faultq_total;
+    g_faultq[slot].lost   = g_faultq_dropped;
+    g_faultq[slot].victim = victim;
+    g_faultq[slot].pc     = pc;
+    g_faultq[slot].addr   = addr;
+    g_faultq[slot].faults = faults;
+  }
 
   /* 监督者没注册，或故障的就是监督者自己 —— 无人可通知 */
 
@@ -322,9 +390,38 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
  *
  ****************************************************************************/
 
-void ort_fault_record(FAR struct ort_faultrec_s *rec)
+int ort_fault_read(FAR struct ort_faultrec_s *rec)
 {
-  *rec = g_lastfault;
+  uint32_t pending;
+
+  /* ★ 只有监督者能读。
+   *
+   * 故障记录是监督者的**私有视图**。放开读会带来两个问题：
+   *   ① 容器可以消费掉监督者的事件（让它漏掉故障）
+   *   ② 容器可以窥探其它容器的故障地址/PC（信息泄露）
+   */
+
+  if (nxsched_self()->pid != g_supervisor)
+    {
+      return -EPERM;
+    }
+
+  if (rec == NULL)
+    {
+      return -EINVAL;
+    }
+
+  pending = g_faultq_total - g_faultq_read;
+  if (pending == 0)
+    {
+      return 0;                 /* 暂无新事件 */
+    }
+
+  *rec = g_faultq[g_faultq_read % ORT_FAULTQ_SIZE];
+
+  g_faultq_read++;
+
+  return (int)rec->seq;
 }
 
 void ort_memdomain_switch(FAR struct tcb_s *to)
