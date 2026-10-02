@@ -23,7 +23,7 @@
 
 #include <nuttx/config.h>
 
-#ifdef CONFIG_ORT_MEMDOMAIN
+#ifdef CONFIG_ORT_CONTAINER
 
 #ifndef __ASSEMBLY__
 
@@ -57,5 +57,5 @@ int ort_supervisor_reset(void);
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
 #endif /* __ASSEMBLY__ */
-#endif /* CONFIG_ORT_MEMDOMAIN */
+#endif /* CONFIG_ORT_CONTAINER */
 #endif /* __ARCH_ARM_INCLUDE_ARM_ORT_H */

@@ -36,6 +36,11 @@
 #include "sched/sched.h"
 #include "arm_internal.h"
 
+#ifdef CONFIG_ORT_MMU
+#  include "arm_ortcommon.h"
+#  include "arm.h"
+#endif
+
 #ifdef CONFIG_LEGACY_PAGING
 #  include <nuttx/page.h>
 #  include "arm.h"
@@ -161,6 +166,34 @@ uint32_t *arm_dataabort(uint32_t *regs, uint32_t dfar, uint32_t dfsr)
   up_set_interrupt_context(true);
 
   /* Crash -- possibly showing diagnostic debug information. */
+
+#ifdef CONFIG_ORT_MMU
+  /* [ORT] 判别故障是否来自用户态。
+   *
+   * ★ ARMv7-A 的判据比 ARMv7-M 简单得多：CPSR 的模式位直接告诉我们
+   *   异常发生时的模式，不需要拿 PC 去比代码区范围。
+   *
+   * 为什么要区分：
+   *   内核代码的 data abort 是真 bug，应当 panic；
+   *   用户进程越界只应终止该进程 ——
+   *   否则一个容器越界会把整机带走，违反「单容器故障隔离」的核心卖点。
+   *   （BUILD_KERNEL 下每个进程有独立地址空间，隔离本来就有；
+   *     缺的只是"别 panic"这一步。）
+   */
+
+  if ((regs[REG_CPSR] & PSR_MODE_MASK) == PSR_MODE_USR)
+    {
+      if (ort_handle_user_fault(regs[REG_PC], dfar))
+        {
+          /* 正常异常返回 → 信号投递 → 进程被终止 */
+
+          up_set_interrupt_context(false);
+          return regs;
+        }
+
+      /* 无法隔离 —— 落到下面 panic（fail-stop） */
+    }
+#endif
 
   _alert("Data abort. PC: %08" PRIx32 " DFAR: %08" PRIx32 " DFSR: %08"
          PRIx32 "\n", regs[REG_PC], dfar, dfsr);

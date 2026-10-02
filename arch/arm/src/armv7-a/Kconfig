@@ -212,3 +212,23 @@ config ARMV7A_ICACHE_DISABLE
 config ARMV7A_AFE_ENABLE
 	bool "Enable Access Flag at __start"
 	default n
+
+
+config ORT_MMU
+	bool "[ORT] Container fault isolation on MMU platforms (prototype)"
+	default n
+	select ORT_CONTAINER
+	---help---
+		[ORT] 原型：让用户进程的越界访问只终止该进程，而不 panic 内核。
+
+		★ 与 ARMv7-M/ARMv8-M 版本的根本区别：
+		  MMU 平台下每个进程有**独立地址空间**，隔离是 MMU 天然给的 ——
+		  不需要任何 per-switch 的 region/页表编程。
+
+		  所以这里没有"内存域"的概念：容器 = 进程 + 它的地址空间。
+		  ORT 要做的只有一件事：**别让一个进程的越界把整机带走**。
+
+		  对应 ORT-M 的 H27，但根因不同 ——
+		  ORT-M 是"NuttX 默认 panic 掉用户故障"，
+		  ORT-A 也是（arch/arm/src/armv7-a/arm_dataabort.c 直接
+		  PANIC_WITH_REGS），只是少了一层用户态判别。

@@ -69,7 +69,7 @@ int prctl(int option, ...)
   va_start(ap, option);
   switch (option)
     {
-#ifdef CONFIG_ORT_MEMDOMAIN
+#ifdef CONFIG_ORT_CONTAINER
       case PR_SET_ORT_DOMAIN:
         {
           /* [ORT] 把**指定容器**绑定到指定域。参数：(int domain, pid_t pid)

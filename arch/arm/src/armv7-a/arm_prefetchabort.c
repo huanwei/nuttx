@@ -39,6 +39,11 @@
 #include "sched/sched.h"
 #include "arm_internal.h"
 
+#ifdef CONFIG_ORT_MMU
+#  include "arm_ortcommon.h"
+#  include "arm.h"
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -130,6 +135,21 @@ uint32_t *arm_prefetchabort(uint32_t *regs, uint32_t ifar, uint32_t ifsr)
 
   tcb->xcp.regs = regs;
   up_set_interrupt_context(true);
+
+#ifdef CONFIG_ORT_MMU
+  /* [ORT] 同 arm_dataabort.c：用户态故障只终止进程，不 panic 内核。
+   * 取指越界同样是"容器自己坏了"，不该带走整机。
+   */
+
+  if ((regs[REG_CPSR] & PSR_MODE_MASK) == PSR_MODE_USR)
+    {
+      if (ort_handle_user_fault(regs[REG_PC], ifar))
+        {
+          up_set_interrupt_context(false);
+          return regs;
+        }
+    }
+#endif
 
   /* Crash -- possibly showing diagnostic debug information. */
 
