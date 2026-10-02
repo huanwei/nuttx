@@ -32,6 +32,21 @@
  * Public Functions
  ****************************************************************************/
 
+#ifdef CONFIG_ORT_MEMDOMAIN
+/* [ORT] ARMv7-M per-task MPU memory domain hook.
+ *
+ * 注意：此处是「通用调度器代码」，按正式设计应改为 include/nuttx/arch.h 中的
+ *      up_* 弱符号（up_switch_context 同级的 hook）。
+ *      原型阶段用显式 extern，避免为此再改一个公共头文件。
+ */
+
+extern void ort_memdomain_switch(FAR struct tcb_s *to);
+#endif
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
 /****************************************************************************
  * Name: nxsched_switch_context
  *
@@ -50,6 +65,19 @@
 void nxsched_switch_context(FAR struct tcb_s *from, FAR struct tcb_s *to)
 {
   nxsched_checkstackoverflow(from);
+
+#ifdef CONFIG_ORT_MEMDOMAIN
+  /* [ORT] ★ 关键钩子：在 arch 层真正切换之前，
+   *       为「即将运行」的任务（to）编程 MPU region。
+   *
+   * 为什么在切换之前而不是之后：
+   *   切换动作本身在 SVC 里以特权模式执行（PRIVDEFENA=1），
+   *   特权代码不受用户 region 限制，所以改 region 不会影响
+   *   对 outgoing 任务寄存器的保存。
+   */
+
+  ort_memdomain_switch(to);
+#endif
 
 #ifdef CONFIG_SCHED_SPORADIC
   /* Perform sporadic schedule operations */

@@ -248,6 +248,16 @@ struct xcptcontext
    */
 
   uint32_t *regs;
+
+#ifdef CONFIG_ORT_MEMDOMAIN
+  /* [ORT] Per-task MPU memory domain id (-1 = none).
+   *
+   * 由上下文切换钩子 ort_memdomain_switch() 读取，用于编程 MPU region。
+   * 放在这里而非 tcb_s：这是 ARMv7-M MPU 的架构相关概念。
+   */
+
+  int domain_id;
+#endif
 };
 
 /****************************************************************************

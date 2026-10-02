@@ -151,3 +151,17 @@ config ARMV7M_SYSTICK_IRQ_THREAD_STACK_SIZE
 	default DEFAULT_TASK_STACKSIZE
 
 endif # ARMV7M_SYSTICK_IRQ_WQUEUE
+
+config ORT_MEMDOMAIN
+	bool "[ORT] Per-task MPU memory domain (prototype)"
+	default n
+	depends on ARM_MPU && BUILD_PROTECTED
+	---help---
+		[ORT] 原型：在上下文切换时为 incoming 任务重编程 MPU region，
+		实现任务间内存隔离。
+
+		机制：预留一段用户 RAM 作「域池」，切成等大块；
+		切换时把 incoming 任务的块编成 user-RW，池整体编成 no-access，
+		依赖 ARMv7-M「高编号 region 优先」实现隔离。
+
+		⚠️ 这是原型，域分配策略为 pid 取模，仅供验证机制。

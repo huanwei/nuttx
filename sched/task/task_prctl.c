@@ -69,6 +69,23 @@ int prctl(int option, ...)
   va_start(ap, option);
   switch (option)
     {
+#ifdef CONFIG_ORT_MEMDOMAIN
+      case PR_SET_ORT_DOMAIN:
+        {
+          /* [ORT] 把调用任务绑定到指定域。
+           * 参数：int domain_id（-1 = 解除绑定）
+           * 返回值：0 成功 / -EINVAL 域号越界
+           */
+
+          /* 只负责设值；越界校验在 ort_memdomain_switch() 里做，
+           * 避免 sched/ 依赖 arch/ 的头文件。
+           */
+
+          this_task()->xcp.domain_id = va_arg(ap, int);
+          return OK;
+        }
+#endif
+
       case PR_SET_NAME:
       case PR_GET_NAME:
       case PR_SET_NAME_EXT:

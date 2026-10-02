@@ -31,6 +31,9 @@
 #include <inttypes.h>
 
 #include <arch/irq.h>
+#ifdef CONFIG_BUILD_PROTECTED
+#  include <nuttx/userspace.h>
+#endif
 
 #include "nvic.h"
 #include "arm_internal.h"
@@ -133,6 +136,43 @@ int arm_memfault(int irq, void *context, void *arg)
 
       return OK;
     }
+
+#ifdef CONFIG_BUILD_PROTECTED
+  /* [ORT] 判别故障是否来自用户态。
+   *
+   * 判据：faulting PC 落在用户代码区（USERSPACE->us_textstart..us_textend）。
+   *
+   * 为什么必须区分：
+   *   内核代码的 memfault 是真 bug，应当 panic；
+   *   用户态（容器）越界只应终止该任务 ——
+   *   否则一个容器越界会把 SystemPrivTask 一起带走，
+   *   违反「单容器故障隔离、不影响整机」的核心卖点。
+   */
+
+  if (USERSPACE->us_textstart != 0)
+    {
+      FAR uint32_t *regs = (FAR uint32_t *)context;
+      uintptr_t pc = (uintptr_t)regs[REG_PC];
+
+      if (pc >= USERSPACE->us_textstart && pc < USERSPACE->us_textend)
+        {
+          _alert("ORT: USER TASK MEMFAULT pc=%08" PRIxPTR
+                 " addr=%08" PRIx32 " -> killing task\n",
+                 pc, getreg32(NVIC_MEMMANAGE_ADDR));
+
+          putreg32(0xff, NVIC_CFAULTS);
+          putreg32(0, NVIC_MEMMANAGE_ADDR);
+
+          /* 终止当前任务（内核内部接口，不返回）。
+           * 不用 exit()：那是 libc 的用户态入口，内核 pass 不链接它。
+           */
+
+          extern int nxtask_exit(void);
+          nxtask_exit();
+          return OK; /* 不可达 */
+        }
+    }
+#endif
 
   up_irq_save();
   PANIC_WITH_REGS("panic", context);

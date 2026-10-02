@@ -79,6 +79,9 @@
 #define PR_SET_DUMPABLE 5
 #define PR_GET_DUMPABLE 6
 
+/* [ORT] Bind the calling task to an MPU memory domain (prototype) */
+#define PR_SET_ORT_DOMAIN 7
+
 /****************************************************************************
  * Public Type Definitions
  ****************************************************************************/
