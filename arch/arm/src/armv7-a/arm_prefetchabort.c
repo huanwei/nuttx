@@ -143,10 +143,12 @@ uint32_t *arm_prefetchabort(uint32_t *regs, uint32_t ifar, uint32_t ifsr)
 
   if ((regs[REG_CPSR] & PSR_MODE_MASK) == PSR_MODE_USR)
     {
-      if (ort_handle_user_fault(regs[REG_PC], ifar))
+      /* 同 arm_dataabort.c：必须走 _kstack 版本，并返回搬走后的帧 */
+
+      if (ort_handle_user_fault_kstack(tcb, regs[REG_PC], ifar))
         {
           up_set_interrupt_context(false);
-          return regs;
+          return tcb->xcp.regs;
         }
     }
 #endif

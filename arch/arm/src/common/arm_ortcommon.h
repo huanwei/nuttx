@@ -53,5 +53,20 @@ int ort_supervisor_reset(void);
 
 pid_t ort_supervisor_pid(void);
 
+/* [ARMv7-A / MMU 专用] abort 处理器必须调这个版本，不能直接调
+ * ort_handle_user_fault()。
+ *
+ * 原因见 armv7-a/arm_ort.c 里 ort_fault_on_kstack() 的注释：
+ * KERNEL 构建下 abort 向量把寄存器帧建在用户栈上，而异常处理器的
+ * 调用帧也在同一张栈上 —— up_schedule_sigaction() 的原地帧下移
+ * 会踩掉处理器自己的返回地址。这个包装把终止路径换到内核栈上跑。
+ */
+
+#ifdef CONFIG_ORT_MMU
+bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr);
+bool ort_handle_user_fault_kstack(FAR struct tcb_s *tcb,
+                                  uintptr_t pc, uintptr_t addr);
+#endif
+
 #endif /* CONFIG_ORT_CONTAINER */
 #endif /* __ARCH_ARM_SRC_COMMON_ARM_ORTCOMMON_H */

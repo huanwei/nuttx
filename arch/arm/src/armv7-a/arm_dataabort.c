@@ -183,12 +183,31 @@ uint32_t *arm_dataabort(uint32_t *regs, uint32_t dfar, uint32_t dfsr)
 
   if ((regs[REG_CPSR] & PSR_MODE_MASK) == PSR_MODE_USR)
     {
-      if (ort_handle_user_fault(regs[REG_PC], dfar))
+      /* ★ 必须走 _kstack 版本：KERNEL 构建下 abort 向量把寄存器帧建在
+       *   用户栈上，而异常处理器的调用帧也在同一张栈上 ——
+       *   直接调会让 up_schedule_sigaction() 的原地帧下移踩掉
+       *   调用链自己的返回地址（实测：无输出、整机复位）。
+       *   见 arm_ort.c 的 ort_fault_on_kstack()。
+       */
+
+      if (ort_handle_user_fault_kstack(tcb, regs[REG_PC], dfar))
         {
           /* 正常异常返回 → 信号投递 → 进程被终止 */
 
           up_set_interrupt_context(false);
-          return regs;
+
+          /* ★ 返回 tcb->xcp.regs 而不是入参 regs。
+           *
+           *   信号投递（up_schedule_sigaction）会把寄存器帧**搬到别处**
+           *   并把 PC 设成 arm_sigdeliver；矢量代码要用搬走后的那一份
+           *   （arm_vectors.S: "It will differ if a context switch is
+           *   required"）。
+           *
+           *   返回旧的 regs 会让进程回到故障指令上再 fault 一次 ——
+           *   无限循环。若信号没被排上，两者本来就相等，返回它也无害。
+           */
+
+          return tcb->xcp.regs;
         }
 
       /* 无法隔离 —— 落到下面 panic（fail-stop） */

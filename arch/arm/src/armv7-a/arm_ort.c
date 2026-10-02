@@ -37,13 +37,105 @@
 
 #include <nuttx/sched.h>
 #include <nuttx/arch.h>
+#include <nuttx/irq.h>
+#include <nuttx/signal.h>
 
 #include "arm_ortcommon.h"
 #include "arm.h"
 
 /****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+#ifdef CONFIG_ARCH_KERNEL_STACK
+
+/****************************************************************************
+ * Name: ort_fault_on_kstack
+ *
+ * Description:
+ *   在**本进程的内核栈**上运行 ort_handle_user_fault()。
+ *
+ *   ★ 为什么必须换栈（见手册 §三·补十一）：
+ *
+ *   `up_schedule_sigaction()` 会把寄存器帧**原地**下移 XCPTCONTEXT_SIZE：
+ *
+ *       tcb->xcp.regs = (uint32_t)tcb->xcp.regs - XCPTCONTEXT_SIZE;
+ *       memcpy(tcb->xcp.regs, tcb->xcp.saved_regs, XCPTCONTEXT_SIZE);
+ *
+ *   - **系统调用路径安全**：处理器跑在**内核栈**上，帧在**用户栈**上，
+ *     两张栈不相干，下移落到用户栈的空闲区。
+ *   - **abort 向量不安全**：`arm_vectordata` 把帧建在 SYS 栈上 ——
+ *     而 SYS 栈就是用户栈（SYS/USR 共用 SP）。于是异常处理器的调用帧
+ *     和帧**共用同一张栈**，下移区间 `[regs-XS, regs)` 正好压住
+ *     处理器自己的返回地址。
+ *
+ *   实测症状：无 panic、无输出、**整机复位** ——
+ *   因为返回地址被踩后执行流直接跳到垃圾地址。
+ *
+ *   内核栈只在 SVC 期间使用，而 abort 向量进来时已 `cpsid if` 关中断，
+ *   不存在重入。asm 里保存/恢复 sp，调用者可以正常继续。
+ *
+ ****************************************************************************/
+
+static bool ort_fault_on_kstack(FAR struct tcb_s *tcb,
+                                uintptr_t pc, uintptr_t addr)
+{
+  uintptr_t ret;
+
+  if (tcb->xcp.kstack == NULL)
+    {
+      /* 没分配内核栈（非 KERNEL 构建）——退回原路径。
+       * 那条路径只在 KERNEL 构建下才有上面这个问题。
+       */
+
+      return ort_handle_user_fault(pc, addr);
+    }
+
+  __asm__ __volatile__
+    (
+     "mov  r4, sp\n"
+     "mov  sp, %[ksp]\n"
+     "mov  r0, %[pc]\n"
+     "mov  r1, %[addr]\n"
+     "blx  %[fn]\n"
+     "mov  sp, r4\n"
+     "mov  %[ret], r0\n"
+     : [ret]  "=r" (ret)
+     : [pc]   "r"   (pc),
+       [addr] "r"   (addr),
+       [ksp]  "r"   ((uintptr_t)tcb->xcp.kstack + ARCH_KERNEL_STACKSIZE),
+       [fn]   "r"   (ort_handle_user_fault)
+     : "r0", "r1", "r4", "lr", "memory", "cc"
+    );
+
+  return ret != 0;
+}
+
+#else
+
+#  define ort_fault_on_kstack(tcb, pc, addr) \
+          ort_handle_user_fault(pc, addr)
+
+#endif /* CONFIG_ARCH_KERNEL_STACK */
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: ort_handle_user_fault_kstack
+ *
+ * Description:
+ *   ort_handle_user_fault() 的入口包装：abort 处理器必须调这个，
+ *   直接调 ort_handle_user_fault() 会在 KERNEL 构建下踩掉自己的调用帧。
+ *
+ ****************************************************************************/
+
+bool ort_handle_user_fault_kstack(FAR struct tcb_s *tcb,
+                                  uintptr_t pc, uintptr_t addr)
+{
+  return ort_fault_on_kstack(tcb, pc, addr);
+}
 
 /****************************************************************************
  * Name: ort_container_domain
