@@ -41,6 +41,10 @@
 #include "nvic.h"
 #include "arm_internal.h"
 
+#ifdef CONFIG_ORT_MEMDOMAIN
+#  include "arm_memdomain.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -160,14 +164,16 @@ int arm_memfault(int irq, void *context, void *arg)
       if (pc >= USERSPACE->us_textstart && pc < USERSPACE->us_textend)
         {
           FAR struct tcb_s *ftcb = nxsched_self();
+          uintptr_t addr = (uintptr_t)getreg32(NVIC_MEMMANAGE_ADDR);
           int ret = -ESRCH;
 
           _alert("ORT: USER TASK MEMFAULT pid=%d pc=%08" PRIxPTR
-                 " addr=%08" PRIx32 " -> terminate task\n",
-                 ftcb != NULL ? ftcb->pid : -1, pc,
-                 getreg32(NVIC_MEMMANAGE_ADDR));
+                 " addr=%08" PRIxPTR " -> terminate task\n",
+                 ftcb != NULL ? ftcb->pid : -1, pc, addr);
 
-          /* 先清 fault 状态，避免异常返回时重新触发同一个 fault */
+          /* 先清 fault 状态，避免异常返回时重新触发同一个 fault。
+           * 必须在读走 MMFAR 之后 —— 写 0 到 MMFAR 会丢掉故障地址。
+           */
 
           putreg32(0xff, NVIC_CFAULTS);
           putreg32(0, NVIC_MEMMANAGE_ADDR);
@@ -178,6 +184,18 @@ int arm_memfault(int irq, void *context, void *arg)
               up_irq_save();
               PANIC_WITH_REGS("user memfault: no tcb", context);
             }
+
+          /* ── 第零步：先通知监督者 ────────────────────────────────────
+           *
+           * 必须用**独立通道**，不能靠容器自己注册的 SIGSEGV 处理器：
+           * 那个处理器是容器可控的（SIG_IGN 在 NuttX 里等于把动作删掉），
+           * 容器一删，监督者就瞎了。
+           *
+           * 先通知再终止：让监督者尽早拿到事件，且不受后续流程影响。
+           */
+
+          ort_fault_notify(ftcb->pid, pc, addr,
+                           (uint32_t)ftcb->xcp.fault_count + 1);
 
           /* ── 第一步：投递 SIGSEGV，给容器/监督者一个可观测点 ──────────
            *

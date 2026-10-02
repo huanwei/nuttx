@@ -83,6 +83,36 @@ int prctl(int option, ...)
           ort_memdomain_bind(this_task(), va_arg(ap, int));
           return OK;
         }
+
+      case PR_SET_ORT_SUPERVISOR:
+        {
+          /* [ORT] 把自己注册为监督者：内核在容器故障时通知它。
+           * 只接受首次注册，重复注册返回 -EBUSY。
+           */
+
+          return ort_supervisor_set((int)this_task()->pid);
+        }
+
+      case PR_GET_ORT_FAULT:
+        {
+          /* [ORT] 取回最近一次容器故障记录。
+           *
+           * ⚠️ 原型期直接按用户指针写 —— PROTECTED 构建下内核能访问
+           *    用户内存所以可行，但**没有做指针合法性校验**。
+           *    正式实现必须校验（或改为内核侧环形缓冲 + 只读文件接口）。
+           */
+
+          FAR struct ort_faultrec_s *rec =
+              (FAR struct ort_faultrec_s *)va_arg(ap, uintptr_t);
+
+          if (rec == NULL)
+            {
+              return -EINVAL;
+            }
+
+          ort_fault_record(rec);
+          return (int)rec->seq;
+        }
 #endif
 
       case PR_SET_NAME:

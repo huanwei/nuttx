@@ -584,6 +584,18 @@ struct tcb_s;
  */
 
 EXTERN void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain);
+
+/* [ORT] 内核 → 监督者的故障通道。
+ *
+ * 故障任务自己注册的 SIGSEGV 处理器是容器可控的（容器可以把它删掉），
+ * 所以「知道出事了」不能依赖它 —— 需要这条独立通道。
+ * 信号只作唤醒用，详情由 ort_fault_record() 取回。
+ */
+
+struct ort_faultrec_s;
+
+EXTERN int  ort_supervisor_set(int pid);
+EXTERN void ort_fault_record(FAR struct ort_faultrec_s *rec);
 #endif
 
 #undef EXTERN

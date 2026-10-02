@@ -27,6 +27,9 @@
  * Included Files
  ****************************************************************************/
 
+#include <stdint.h>
+#include <signal.h>
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -82,9 +85,53 @@
 /* [ORT] Bind the calling task to an MPU memory domain (prototype) */
 #define PR_SET_ORT_DOMAIN 7
 
+/* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
+ *
+ *   prctl(PR_SET_ORT_SUPERVISOR);
+ *
+ * 只接受首次注册（单槽）。重复注册返回 -EBUSY。
+ */
+#define PR_SET_ORT_SUPERVISOR 8
+
+/* [ORT] 读取最近一次容器故障记录（prototype）
+ *
+ *   struct ort_faultrec_s rec;
+ *   prctl(PR_GET_ORT_FAULT, &rec);
+ *
+ * 返回值：本次读取到的记录的 seq；从未发生故障返回 0。
+ */
+#define PR_GET_ORT_FAULT 9
+
+/* [ORT] 容器故障通知信号
+ *
+ * 为什么用 SIGUSR1：CONFIG_SIG_SIGUSR1_ACTION 默认为 n，
+ * 内核**不会**给它配默认动作 —— 只有主动 sigaction() 挂钩子的监督者
+ * 才会收到，普通任务不受影响（也不会被误杀）。
+ *
+ * ⚠️ 原型期硬编码。正式实现应做成可配置，或改用实时信号（可靠队列）。
+ */
+#define ORT_SIGFAULT SIGUSR1
+
 /****************************************************************************
  * Public Type Definitions
  ****************************************************************************/
+
+/* [ORT] 容器故障记录（prototype）
+ *
+ * ⚠️ 这是内核与监督者之间的**原型期**接口，不是最终形态：
+ *    - 只有一条单槽记录，会被后来的故障覆盖
+ *    - seq 递增，监督者据此判断自己是否漏了事件
+ *    - 正式实现应改为环形缓冲 / 事件队列，且需校验用户指针
+ */
+
+struct ort_faultrec_s
+{
+  uint32_t  seq;      /* 递增序号；0 = 从未发生故障 */
+  int       victim;   /* 故障容器的 pid */
+  uintptr_t pc;       /* 触发故障的指令地址 */
+  uintptr_t addr;     /* 被非法访问的地址 */
+  uint32_t  faults;   /* 该容器累计故障次数 */
+};
 
 /****************************************************************************
  * Public Function Prototypes

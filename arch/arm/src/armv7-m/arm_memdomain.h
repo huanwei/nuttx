@@ -72,18 +72,21 @@
 
 struct tcb_s;
 
+/* 注：ort_memdomain_bind() / ort_supervisor_set() / ort_fault_record()
+ * 需要被 sched/ 调用，声明放在 arch/arm/include/armv7-m/irq.h
+ * （跟着字段走），这里不重复。
+ */
+
 /****************************************************************************
- * Name: ort_memdomain_bind
+ * Name: ort_fault_notify
  *
  * Description:
- *   把任务绑定到指定域（domain < 0 表示解除绑定）。
- *
- *   调用方（sched/task/task_prctl.c）不需要知道编码方式 ——
- *   编码是本文件与 arm_memdomain.c 之间的私有约定。
+ *   记录一次容器故障并通知监督者。从 MemManage 异常处理上下文调用。
  *
  ****************************************************************************/
 
-void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain);
+void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
+                      uint32_t faults);
 
 /****************************************************************************
  * Name: ort_memdomain_switch
