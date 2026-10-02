@@ -545,43 +545,14 @@ extern "C"
 #define EXTERN extern
 #endif
 
-#ifdef CONFIG_ORT_MEMDOMAIN
-/* [ORT] 域绑定接口。
- *
- * 为什么放在这里而不是 arch/arm/src/armv7-m/arm_memdomain.h：
- *   sched/task/task_prctl.c 需要调用它，但 sched/ 不应该 include
- *   arch/src 下的私有头文件。实现在 arch/arm/src/armv7-m/arm_memdomain.c。
- *
- * 为什么用函数而不是让调用方直接写字段：
- *   「未绑定」的编码方式（0）是 arm_memdomain.c 的私有约定，
- *   暴露给 sched/ 只会多一个漏改的地方。
- */
-
-struct task_group_s;
-
-EXTERN int ort_container_bind(pid_t pid, int domain);
-EXTERN int ort_container_domain(FAR struct task_group_s *group);
-
-/* [ORT] 内核 → 监督者的故障通道。
- *
- * 故障任务自己注册的 SIGSEGV 处理器是容器可控的（容器可以把它删掉），
- * 所以「知道出事了」不能依赖它 —— 需要这条独立通道。
- * 信号只作唤醒用，详情由 ort_fault_record() 取回。
- */
-
-struct ort_faultrec_s;
-
-EXTERN int  ort_supervisor_set(pid_t pid);
-#ifdef CONFIG_ORT_SUPERVISOR_RESET
-EXTERN int  ort_supervisor_reset(void);
-#endif
-EXTERN int  ort_fault_read(FAR struct ort_faultrec_s *rec);
-#endif
-
 #undef EXTERN
 #ifdef __cplusplus
 }
 #endif
 #endif /* __ASSEMBLY__ */
+
+/* [ORT] 容器/域/监督者接口（armv7-m 与 armv8-m 共用） */
+
+#include <arch/arm_ort.h>
 
 #endif /* __ARCH_ARM_INCLUDE_ARMV7_M_IRQ_H */

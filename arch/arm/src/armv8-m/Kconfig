@@ -155,3 +155,23 @@ config ARMV8M_CMSE
 	bool "ARMv8-M Security Extensions"
 	---help---
 		Enable ARMv8-M Security Extensions.
+
+
+config ORT_MEMDOMAIN
+	bool "[ORT] Per-container MPU memory domain (prototype, PMSAv8)"
+	default n
+	depends on ARM_MPU && BUILD_PROTECTED
+	select ORT_CONTAINER
+	---help---
+		[ORT] 原型：上下文切换时为 incoming 容器重编程 MPU region，
+		实现容器间内存隔离（ARMv8-M / PMSAv8 版本）。
+
+		★ 与 ARMv7-M 版本的关键差异：
+		  PMSAv8 的 region **不允许重叠**，所以不能照搬 armv7-m 的
+		  「池 no-access + 本块 RW 靠高编号覆盖」技巧。
+		  这里只用**一个** region 指向本容器的块，其余地址不被任何
+		  region 覆盖 —— 未覆盖地址在非特权态一律 fault
+		  （PRIVDEFENA 只对特权态放行）。
+
+		  结果反而更简单：每次切换一次 mpu_modify_region()，
+		  不需要"池"的概念。

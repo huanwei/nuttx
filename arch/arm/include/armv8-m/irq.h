@@ -518,4 +518,8 @@ extern "C"
 #endif
 #endif /* __ASSEMBLY__ */
 
+/* [ORT] 容器/域/监督者接口（armv7-m 与 armv8-m 共用） */
+
+#include <arch/arm_ort.h>
+
 #endif /* __ARCH_ARM_INCLUDE_ARMV8_M_IRQ_H */

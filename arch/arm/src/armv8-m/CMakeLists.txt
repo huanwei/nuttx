@@ -72,6 +72,7 @@ endif()
 
 if(CONFIG_ARM_MPU OR CONFIG_ARM_MPU_EARLY_RESET)
   list(APPEND SRCS arm_mpu.c)
+  list(APPEND SRCS arm_memdomain.c)
 endif()
 
 if(CONFIG_ARCH_TRUSTZONE_SECURE)
