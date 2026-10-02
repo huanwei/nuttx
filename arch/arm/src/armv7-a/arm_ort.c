@@ -43,6 +43,8 @@
 #include "arm_ortcommon.h"
 #include "arm.h"
 
+#include "signal/signal.h"         /* nxsig_isdefault() */
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -117,6 +119,72 @@ static bool ort_fault_on_kstack(FAR struct tcb_s *tcb,
           ort_handle_user_fault(pc, addr)
 
 #endif /* CONFIG_ARCH_KERNEL_STACK */
+
+/****************************************************************************
+ * Name: ort_sig_kill
+ *
+ * Description:
+ *   给故障进程投递信号，并保证「默认终止动作」在**内核栈**上就地完成。
+ *
+ *   ★ 为什么不能一律走 nxsig_kill()（见手册 §三·补十二）：
+ *
+ *   SIGSEGV 的默认动作（CONFIG_SIG_DEFAULT）是 nxsig_abnormal_termination()，
+ *   它结尾是 `_exit(EXIT_FAILURE)` —— 在**调用者脚下的那张栈**上执行。
+ *
+ *   而在异常上下文里，nxsig_queue_action() 会因为 up_interrupt_context()
+ *   为真而选择 up_schedule_sigaction()：把寄存器帧搬到用户栈上、
+ *   把 PC 设成 arm_sigdeliver。于是整条终止路径最终跑在**用户栈**上，
+ *   `_exit()` 一执行就把 trampoline 正踩着的那张用户栈拆掉了 ——
+ *   实测表现为取指跳飞到 0x2、arm_undefinedinsn panic。
+ *
+ *   nxsig_isdefault() 恰好就是 nxsig_deliver() 用来区分
+ *   「内核态处理器」和「用户态处理器」的那个判据：
+ *
+ *     - true  → 处理器是内核里的默认动作，**绝不会**把控制权交给用户代码；
+ *     - false → 进程自己装的处理器，nxsig_deliver() 会走
+ *               up_signal_dispatch() 切回用户态去跑。
+ *
+ *   所以只有前者可以在内核栈上直接投递。后者必须照旧走 trampoline：
+ *   用户代码一旦在内核栈、SYS 模式下执行，就是实打实的特权提升。
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_SIG_DEFAULT
+static int ort_sig_kill(FAR struct tcb_s *ftcb, int signo)
+{
+  irqstate_t flags;
+  int ret;
+
+  if (!nxsig_isdefault(ftcb, signo) || !up_interrupt_context())
+    {
+      /* 用户自己的处理器 / 不在异常上下文 —— 走原来的路。 */
+
+      return nxsig_kill(ftcb->pid, signo);
+    }
+
+  /* 临时摘掉中断上下文标志，让 nxsig_queue_action() 走「直接投递」分支
+   * （stcb == this_task() && !up_interrupt_context()）：
+   * 默认动作于是在当前这张（内核）栈上跑完，_exit() 不会拆掉自己的栈。
+   *
+   * 正常情况下 nxsig_kill() 不返回（_exit() 已经换到别的任务去了），
+   * 下面的恢复语句只在投递失败时才会执行。
+   */
+
+  flags = up_irq_save();
+  up_set_interrupt_context(false);
+
+  ret = nxsig_kill(ftcb->pid, signo);
+
+  up_set_interrupt_context(true);
+  up_irq_restore(flags);
+  return ret;
+}
+
+#else
+
+#  define ort_sig_kill(ftcb, signo) nxsig_kill((ftcb)->pid, (signo))
+
+#endif /* CONFIG_SIG_DEFAULT */
 
 /****************************************************************************
  * Public Functions
@@ -242,7 +310,7 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
 
   if (faults == 1)
     {
-      ret = nxsig_kill(ftcb->pid, SIGSEGV);
+      ret = ort_sig_kill(ftcb, SIGSEGV);
     }
 
   /* ── 第二步：保证进程一定会死（监督者的终止权）──────────────────
@@ -263,7 +331,7 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
     {
       _alert("ORT: escalating pid=%d to SIGKILL (faults=%" PRIu32 ")\n",
              ftcb->pid, faults);
-      ret = nxsig_kill(ftcb->pid, SIGKILL);
+      ret = ort_sig_kill(ftcb, SIGKILL);
     }
 
   /* 最后兜底：连 SIGKILL 都投不出去（CONFIG_SIG_DEFAULT 没开）
