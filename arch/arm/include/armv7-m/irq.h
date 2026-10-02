@@ -263,6 +263,22 @@ struct xcptcontext
 
   int domain_id;
 #endif
+
+#ifdef CONFIG_ORT_MEMDOMAIN
+  /* [ORT] 该任务经历过的用户态 memfault 次数。
+   *
+   *   0       = 从未故障（BSS 清零的天然初值）
+   *   n (>0)  = 已故障 n 次
+   *
+   * 用途：区分「首次故障」与「投递了 SIGSEGV 之后又回到故障指令」。
+   * 后者说明容器的 SIGSEGV 处理没能终止它，必须升级到不可捕获的
+   * SIGKILL —— 否则容器可以把越界变成 no-op，无限 fault 卡死 CPU。
+   *
+   * 与 domain_id 同属原型期的临时落点，正式实现应移到 task_group_s。
+   */
+
+  int fault_count;
+#endif
 };
 
 /****************************************************************************
