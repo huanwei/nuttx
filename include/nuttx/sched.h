@@ -502,6 +502,26 @@ struct task_group_s
   FAR int *tg_statloc;              /* Location to return exit status       */
 #endif
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT] 容器资源绑定 *****************************************************
+   *
+   * 为什么挂在 group 而不是 TCB：
+   *   一个容器 = 一个 task_group_s（任务 + 它的所有 pthread）。
+   *   同容器的线程共享内存，所以内存域、故障计数这些**必须是容器级的** ——
+   *   挂在 TCB 上会让同一容器的两个线程拿到不同的域。
+   *
+   * ★ tg_ort_domain 的编码（0 = 未绑定）：
+   *   task_group_s 由 kmm_zalloc() 分配（group_create.c），或本身就是
+   *   BSS 里的 g_kthread_group —— 0 是天然初值，必须表示「未绑定」。
+   *   若用 -1 哨兵，任何漏初始化的 group 都会拿到域 0（实测踩过，见 H28）。
+   *
+   *   域 n 存为 n+1；写入一律经 ort_container_bind()，不要直接赋值。
+   */
+
+  uint8_t tg_ort_domain;            /* 0 = 未绑定；n>0 = 域 (n-1)           */
+  uint8_t tg_ort_faults;            /* 该容器累计的用户态 memfault 次数     */
+#endif
+
 #ifndef CONFIG_DISABLE_PTHREAD
   /* Pthreads ***************************************************************/
 

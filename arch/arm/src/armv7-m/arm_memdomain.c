@@ -103,23 +103,75 @@ static void ort_memdomain_lazyinit(void)
  * Public Functions
  ****************************************************************************/
 
-void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain)
+/****************************************************************************
+ * Name: ort_container_domain
+ *
+ * Description:
+ *   查询容器的域。未绑定返回 -1。
+ *   容器用它来等待「准入」—— 创建与绑域之间存在窗口，容器在绑好之前
+ *   不应碰任何受控内存。
+ *
+ ****************************************************************************/
+
+int ort_container_domain(FAR struct task_group_s *group)
 {
-  if (tcb == NULL)
+  if (group == NULL || !ORT_DOMAIN_VALID(group->tg_ort_domain))
     {
-      return;
+      return -1;
     }
+
+  return ORT_DOMAIN_DECODE(group->tg_ort_domain);
+}
+
+int ort_container_bind(pid_t pid, int domain)
+{
+  FAR struct tcb_s *tcb;
+  FAR struct task_group_s *group;
+  irqstate_t flags;
+
+  /* ★ 只有监督者能绑域。
+   *
+   * 为什么不许容器自己申报：
+   *   域号就是池里的块号。容器若能自己选块，就能选到**别的容器的块** ——
+   *   那正是隔离要防的事。所以「绑哪个域」必须是监督者的决定。
+   *
+   *   这不是理论风险：早期原型就是自助式绑定（prctl 直接写自己的域），
+   *   等价于把隔离的门钥匙交给被隔离的人。
+   */
+
+  if (nxsched_self()->pid != g_supervisor)
+    {
+      return -EPERM;
+    }
+
+  /* 取目标任务的 group。用 enter_critical_section 保护 ——
+   * 目标任务可能正在退出，group 指针随时可能变。
+   */
+
+  flags = enter_critical_section();
+
+  tcb = nxsched_get_tcb(pid);
+  if (tcb == NULL || tcb->group == NULL)
+    {
+      leave_critical_section(flags);
+      return -ESRCH;
+    }
+
+  group = tcb->group;
 
   /* 越界 → 视为解除绑定（拒绝访问，而不是给出错误映射） */
 
   if (domain < 0 || domain >= ORT_DOMAIN_COUNT)
     {
-      tcb->xcp.domain_id = ORT_DOMAIN_UNBOUND;
+      group->tg_ort_domain = ORT_DOMAIN_UNBOUND;
     }
   else
     {
-      tcb->xcp.domain_id = ORT_DOMAIN_ENCODE(domain);
+      group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
     }
+
+  leave_critical_section(flags);
+  return OK;
 }
 
 /****************************************************************************
@@ -136,9 +188,25 @@ void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain)
 
 int ort_supervisor_set(pid_t pid)
 {
-  if (g_supervisor >= 0)
+  if (g_supervisor >= 0 && g_supervisor != pid)
     {
-      return -EBUSY;
+      /* 已有监督者。只有在它**已经不存在**时才允许接管 ——
+       *
+       * 为什么需要接管：槽位只在「故障通知失败（ESRCH）」时才清。
+       * 监督者正常退出后、下一次故障发生前，槽位一直是脏的，
+       * 若不接管，重启监督者会一直拿到 -EBUSY。
+       *
+       * ⚠️ 原型期局限：按 pid 判存活，pid 被复用时会误判为「还活着」。
+       *    正式实现应持有 TCB/group 引用而不是裸 pid。
+       */
+
+      if (nxsched_get_tcb(g_supervisor) != NULL)
+        {
+          return -EBUSY;
+        }
+
+      _alert("ORT: stale supervisor %d -> taken over by %d\n",
+             g_supervisor, pid);
     }
 
   g_supervisor = pid;
@@ -230,6 +298,7 @@ void ort_fault_record(FAR struct ort_faultrec_s *rec)
 
 void ort_memdomain_switch(FAR struct tcb_s *to)
 {
+  FAR struct task_group_s *group;
   uintptr_t base;
   int domain;
   int bound;
@@ -239,18 +308,20 @@ void ort_memdomain_switch(FAR struct tcb_s *to)
       ort_memdomain_lazyinit();
     }
 
-  /* 原型阶段的绑定方式：任务自己 prctl(PR_SET_ORT_DOMAIN)。
+  /* 域是**容器（group）级**的：同一容器的所有线程共享同一个域。
    *
-   * ⚠️ 正式实现应由 ORT 监督者把域绑到 ContainerGroup（task_group_s），
-   *    而不是让容器自己申报 —— 容器能自己申报就能自己越权。
+   * to->group 理论上恒非空（idle 走 group_allocate，内核线程共享
+   * g_kthread_group），但仍做防御性检查 —— 这里在上下文切换路径上，
+   * 一个空指针就是整机 panic。
    */
 
-  bound = to != NULL ? to->xcp.domain_id : ORT_DOMAIN_UNBOUND;
+  group = to != NULL ? to->group : NULL;
+  bound = group != NULL ? group->tg_ort_domain : ORT_DOMAIN_UNBOUND;
 
   /* ★ 默认拒绝：未绑定 / 越界 → 不给任何域块。
    *
    *   这里必须用 ORT_DOMAIN_VALID() 而不是「domain >= 0」——
-   *   xcp.domain_id 是 BSS 清零的，未绑定的任务天然是 0，
+   *   tg_ort_domain 是 BSS 清零的，未绑定的容器天然是 0，
    *   一旦按「域 0」解释就会 fail-open（实测踩过，见 H28）。
    */
 
@@ -266,7 +337,7 @@ void ort_memdomain_switch(FAR struct tcb_s *to)
   domain = ORT_DOMAIN_DECODE(bound);
   base   = ORT_DOMAIN_POOL_BASE + (uintptr_t)domain * ORT_DOMAIN_BLOCK_SIZE;
 
-  /* ★ 关键动作：把 incoming 任务的域块编成 user-RW。
+  /* ★ 关键动作：把 incoming 容器的域块编成 user-RW。
    *   池 region 保持 no-access，二者重叠时高编号（own）胜出。
    */
 

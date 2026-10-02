@@ -44,20 +44,20 @@
 #define ORT_DOMAIN_BLOCK_SIZE   (16 * 1024)   /* 每域 16KB（2 的幂）       */
 #define ORT_DOMAIN_COUNT        (ORT_DOMAIN_POOL_SIZE / ORT_DOMAIN_BLOCK_SIZE)
 
-/* 域绑定值的编码（存在 tcb->xcp.domain_id）：
+/* 域绑定值的编码（存在 group->tg_ort_domain）：
  *
  *     0       = 未绑定
  *     n (>0)  = 域 (n - 1)
  *
  * ★ 为什么用「0 = 未绑定」而不是「-1 = 未绑定」哨兵：
- *   TCB 全部来自 kmm_zalloc()（task_spawn.c / task_create.c）或
- *   memset(0)（g_idletcb），BSS 清零是唯一天然存在的默认值。
- *   若用 -1 哨兵，任何一条 TCB 创建路径（fork / 内核线程 / idle）
- *   漏设哨兵，该任务就会落到「域 0」—— 隔离 fail-open。
+ *   task_group_s 由 kmm_zalloc() 分配（group_create.c），内核线程共享的
+ *   g_kthread_group 本身就是 BSS —— 0 是唯一天然存在的默认值。
+ *   若用 -1 哨兵，任何一条 group 创建路径漏设哨兵，该容器就会落到
+ *   「域 0」—— 隔离 fail-open。
  *   这不是假设：实测未绑定任务能写 0x60840000，见 H28。
  *
- *   语义上也更自然：域绑定是内核「交给」任务的一个动作，
- *   在动作发生之前任务本来就是未绑定的。
+ *   语义上也更自然：域绑定是监督者「交给」容器的一个动作，
+ *   在动作发生之前容器本来就是未绑定的。
  */
 
 #define ORT_DOMAIN_UNBOUND      0
@@ -72,9 +72,9 @@
 
 struct tcb_s;
 
-/* 注：ort_memdomain_bind() / ort_supervisor_set() / ort_fault_record()
- * 需要被 sched/ 调用，声明放在 arch/arm/include/armv7-m/irq.h
- * （跟着字段走），这里不重复。
+/* 注：ort_container_bind() / ort_supervisor_set() / ort_fault_record()
+ * 需要被 sched/ 调用，声明放在 arch/arm/include/armv7-m/irq.h，
+ * 这里不重复。
  */
 
 /****************************************************************************

@@ -156,6 +156,7 @@ config ORT_MEMDOMAIN
 	bool "[ORT] Per-task MPU memory domain (prototype)"
 	default n
 	depends on ARM_MPU && BUILD_PROTECTED
+	select ORT_CONTAINER
 	---help---
 		[ORT] 原型：在上下文切换时为 incoming 任务重编程 MPU region，
 		实现任务间内存隔离。

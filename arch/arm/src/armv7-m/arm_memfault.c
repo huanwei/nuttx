@@ -164,7 +164,10 @@ int arm_memfault(int irq, void *context, void *arg)
       if (pc >= USERSPACE->us_textstart && pc < USERSPACE->us_textend)
         {
           FAR struct tcb_s *ftcb = nxsched_self();
+          FAR struct task_group_s *fgroup =
+              ftcb != NULL ? ftcb->group : NULL;
           uintptr_t addr = (uintptr_t)getreg32(NVIC_MEMMANAGE_ADDR);
+          uint32_t faults;
           int ret = -ESRCH;
 
           _alert("ORT: USER TASK MEMFAULT pid=%d pc=%08" PRIxPTR
@@ -178,12 +181,18 @@ int arm_memfault(int irq, void *context, void *arg)
           putreg32(0xff, NVIC_CFAULTS);
           putreg32(0, NVIC_MEMMANAGE_ADDR);
 
-          if (ftcb == NULL)
+          if (ftcb == NULL || fgroup == NULL)
             {
-              _alert("ORT: user memfault with no TCB -> fail-stop\n");
+              _alert("ORT: user memfault with no container -> fail-stop\n");
               up_irq_save();
-              PANIC_WITH_REGS("user memfault: no tcb", context);
+              PANIC_WITH_REGS("user memfault: no container", context);
             }
+
+          /* 故障计数是**容器级**的（同容器的线程共享），
+           * 在这里先自增，后续判据都用自增后的值。
+           */
+
+          faults = ++fgroup->tg_ort_faults;
 
           /* ── 第零步：先通知监督者 ────────────────────────────────────
            *
@@ -194,8 +203,7 @@ int arm_memfault(int irq, void *context, void *arg)
            * 先通知再终止：让监督者尽早拿到事件，且不受后续流程影响。
            */
 
-          ort_fault_notify(ftcb->pid, pc, addr,
-                           (uint32_t)ftcb->xcp.fault_count + 1);
+          ort_fault_notify(ftcb->pid, pc, addr, faults);
 
           /* ── 第一步：投递 SIGSEGV，给容器/监督者一个可观测点 ──────────
            *
@@ -210,12 +218,10 @@ int arm_memfault(int irq, void *context, void *arg)
            * 再发一遍没有意义（见第二步）。
            */
 
-          if (ftcb->xcp.fault_count == 0)
+          if (faults == 1)
             {
               ret = nxsig_kill(ftcb->pid, SIGSEGV);
             }
-
-          ftcb->xcp.fault_count++;
 
           /* ── 第二步：保证容器一定会死（★ 监督者的终止权）──────────────
            *
@@ -234,7 +240,7 @@ int arm_memfault(int irq, void *context, void *arg)
            *   (b) 注册一个「打印一下就返回」的处理器
            *       SIGSEGV 正常投递、处理器正常返回，然后异常返回**回到同一条
            *       故障指令**上再次 fault —— 无限循环卡死 CPU。
-           *       → 表现为 fault_count 涨到 2，第二次 fault 升级
+           *       → 表现为 tg_ort_faults 涨到 2，第二次 fault 升级
            *
            * 为什么 SIGKILL 可以依赖：
            *   CONFIG_SIG_DEFAULT 给 SIGKILL 设了 SIG_FLAG_NOCATCH，
@@ -243,10 +249,10 @@ int arm_memfault(int irq, void *context, void *arg)
            *   启动时安装，容器也删不掉。
            */
 
-          if (ftcb->xcp.fault_count > 1 || ftcb->sigdeliver == NULL)
+          if (faults > 1 || ftcb->sigdeliver == NULL)
             {
-              _alert("ORT: escalating pid=%d to SIGKILL (faults=%d)\n",
-                     ftcb->pid, ftcb->xcp.fault_count);
+              _alert("ORT: escalating pid=%d to SIGKILL (faults=%" PRIu32 ")\n",
+                     ftcb->pid, faults);
               ret = nxsig_kill(ftcb->pid, SIGKILL);
             }
 

@@ -2114,3 +2114,20 @@ config HRTIMER_TREE
 endchoice
 
 endif # HRTIMER
+
+menuconfig ORT_CONTAINER
+	bool "[ORT] Container resource binding (prototype)"
+	default n
+	---help---
+		[ORT] 序驰 OrdinRT：把容器（task_group_s）作为资源绑定的单位。
+
+		一个容器 = 一个 task_group_s（任务 + 它的所有 pthread 共享）。
+		容器级的资源（内存域、故障计数……）挂在这里，而不是挂在
+		单个线程的 TCB 上 —— 同一容器的所有线程本来就共享内存，
+		域必须跟着容器走。
+
+		⚠️ 这是原型。目前只用于 MPU 内存域绑定
+		  （由 arch/arm/src/armv7-m/Kconfig 的 ORT_MEMDOMAIN 选中）。
+
+		设计要点：本选项只提供「容器」这个抽象和它的字段，
+		具体用什么机制隔离由 arch 决定。

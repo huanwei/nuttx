@@ -72,16 +72,32 @@ int prctl(int option, ...)
 #ifdef CONFIG_ORT_MEMDOMAIN
       case PR_SET_ORT_DOMAIN:
         {
-          /* [ORT] 把调用任务绑定到指定域。
-           * 参数：int domain（< 0 = 解除绑定）
-           * 返回值：0 成功
+          /* [ORT] 把**指定容器**绑定到指定域。参数：(int domain, pid_t pid)
            *
-           * 越界一律降级为「解除绑定」，由 ort_memdomain_bind() 统一处理 ——
-           * sched/ 不需要知道「未绑定」是怎么编码的，也不需要知道域有几种。
+           * 注意是「容器」不是「任务」：域绑在 task_group_s 上，
+           * 同一容器的所有线程共享一个域。
+           *
+           * ★ 只有 ORT 监督者能调用（-EPERM 拒绝其它调用者）。
+           *   容器不能自己申报域 —— 域号就是内存块号，能自选就能选到
+           *   别的容器的块。权限判断在 ort_container_bind() 里统一做，
+           *   sched/ 不需要知道谁是监督者，也不需要知道域的编码方式。
            */
 
-          ort_memdomain_bind(this_task(), va_arg(ap, int));
-          return OK;
+          int domain = va_arg(ap, int);
+          int pid    = va_arg(ap, int);
+
+          return ort_container_bind((pid_t)pid, domain);
+        }
+
+      case PR_GET_ORT_DOMAIN:
+        {
+          /* [ORT] 查询**本容器**的域。返回域号，未绑定返回 -1。
+           *
+           * 不需要权限：容器当然可以知道自己被分到哪个域 ——
+           * 那是只读信息，知道域号也不能访问别的域。
+           */
+
+          return ort_container_domain(this_task()->group);
         }
 
       case PR_SET_ORT_SUPERVISOR:

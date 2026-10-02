@@ -82,8 +82,27 @@
 #define PR_SET_DUMPABLE 5
 #define PR_GET_DUMPABLE 6
 
-/* [ORT] Bind the calling task to an MPU memory domain (prototype) */
+/* [ORT] 把指定容器绑定到 MPU 内存域（prototype）
+ *
+ *   prctl(PR_SET_ORT_DOMAIN, int domain, pid_t pid);
+ *       domain < 0  → 解除绑定
+ *       pid         → 目标容器中的任一线程
+ *
+ * ★ 域是**容器级**的（task_group_s）：同一容器的所有线程共享一个域。
+ * ★ 只有 ORT 监督者能调用；其它调用者返回 -EPERM。
+ *   容器不能自己申报域 —— 域号就是内存块号，能自选就能选到别人的块。
+ */
 #define PR_SET_ORT_DOMAIN 7
+
+/* [ORT] 查询本容器绑定的域（prototype）
+ *
+ *   prctl(PR_GET_ORT_DOMAIN);
+ *       返回域号；未绑定返回 -1
+ *
+ * 容器用它等待「准入」：容器创建与监督者绑域之间存在窗口，
+ * 在绑好之前容器不应碰任何受控内存。
+ */
+#define PR_GET_ORT_DOMAIN 10
 
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *

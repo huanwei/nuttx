@@ -249,36 +249,13 @@ struct xcptcontext
 
   uint32_t *regs;
 
-#ifdef CONFIG_ORT_MEMDOMAIN
-  /* [ORT] 绑定的 MPU 内存域。
+  /* [ORT] 域绑定与故障计数**不在这里** —— 它们是容器（task_group_s）的属性，
+   * 不是线程 xcptcontext 的属性。见 include/nuttx/sched.h 的
+   * tg_ort_domain / tg_ort_faults。
    *
-   *   0      = 未绑定（TCB 由 kmm_zalloc()/memset(0) 分配，这是天然的初值）
-   *   n (>0) = 域 (n - 1)
-   *
-   * 编码细节见 arch/arm/src/armv7-m/arm_memdomain.h；外部一律通过
-   * ort_memdomain_bind() 写入，由 ort_memdomain_switch() 读取。
-   *
-   * 放在这里而非 tcb_s：这是 ARMv7-M MPU 的架构相关概念。
+   * 早期原型把 domain_id 放在这里，导致同一容器的两个 pthread 会拿到不同
+   * 的域 —— 语义就是错的（同容器线程本来就共享内存）。
    */
-
-  int domain_id;
-#endif
-
-#ifdef CONFIG_ORT_MEMDOMAIN
-  /* [ORT] 该任务经历过的用户态 memfault 次数。
-   *
-   *   0       = 从未故障（BSS 清零的天然初值）
-   *   n (>0)  = 已故障 n 次
-   *
-   * 用途：区分「首次故障」与「投递了 SIGSEGV 之后又回到故障指令」。
-   * 后者说明容器的 SIGSEGV 处理没能终止它，必须升级到不可捕获的
-   * SIGKILL —— 否则容器可以把越界变成 no-op，无限 fault 卡死 CPU。
-   *
-   * 与 domain_id 同属原型期的临时落点，正式实现应移到 task_group_s。
-   */
-
-  int fault_count;
-#endif
 };
 
 /****************************************************************************
@@ -569,21 +546,21 @@ extern "C"
 #endif
 
 #ifdef CONFIG_ORT_MEMDOMAIN
-struct tcb_s;
-
 /* [ORT] 域绑定接口。
  *
  * 为什么放在这里而不是 arch/arm/src/armv7-m/arm_memdomain.h：
  *   sched/task/task_prctl.c 需要调用它，但 sched/ 不应该 include
- *   arch/src 下的私有头文件。声明跟着字段（xcp.domain_id）走，
- *   实现在 arch/arm/src/armv7-m/arm_memdomain.c。
+ *   arch/src 下的私有头文件。实现在 arch/arm/src/armv7-m/arm_memdomain.c。
  *
  * 为什么用函数而不是让调用方直接写字段：
  *   「未绑定」的编码方式（0）是 arm_memdomain.c 的私有约定，
  *   暴露给 sched/ 只会多一个漏改的地方。
  */
 
-EXTERN void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain);
+struct task_group_s;
+
+EXTERN int ort_container_bind(pid_t pid, int domain);
+EXTERN int ort_container_domain(FAR struct task_group_s *group);
 
 /* [ORT] 内核 → 监督者的故障通道。
  *
@@ -594,7 +571,7 @@ EXTERN void ort_memdomain_bind(FAR struct tcb_s *tcb, int domain);
 
 struct ort_faultrec_s;
 
-EXTERN int  ort_supervisor_set(int pid);
+EXTERN int  ort_supervisor_set(pid_t pid);
 EXTERN void ort_fault_record(FAR struct ort_faultrec_s *rec);
 #endif
 
