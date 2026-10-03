@@ -782,11 +782,38 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
         }
     }
 
-  /* 入队。先算 lost，再写槽位。 */
+  /* 入队。先算 lost，再写槽位。
+   *
+   * ★ 这一段曾经是**一整块没有任何保护**的临界区，五条竞争全住在里面
+   *   （R1..R5，见手册 §三·补三十二）。修法**不能用自旋锁**：
+   *   它会被异常上下文调用 —— 同一核在持锁时触发 abort，处理程序
+   *   就会永远自旋，那比丢一条事件严重得多。
+   *
+   *   本轮先修**两条已被实测确认的**（R1 / R4），都是纯写-写竞争，
+   *   用不阻塞的原子取加即可根治。**剩下的 R2/R3/R5 仍然在** ——
+   *   见本节末尾的说明，不要以为这一段已经干净了。
+   *
+   *   R1（已确认：6.25% / 2.67% 的序号凭空消失）
+   *     `g_faultq_total++` 是读-改-写。两个核同时读到同一个值，
+   *     各自加一写回 → 有一次加法蒸发。序号是**每一格的身份证**，
+   *     它丢了就再也没有判据能看见（记录被覆盖、序号还连续）。
+   *     → 改成 `__atomic_fetch_add`。
+   *
+   *   R4（同类）`g_faultq_dropped++` → 同样改成原子取加。
+   *
+   *   ★ 另外顺手掐掉一个**不是**竞争、但同样制造重复序号的写法：
+   *     原版是
+   *         slot = g_faultq_total % N;  g_faultq_total++;  seq = g_faultq_total;
+   *     —— `seq` 是**加完之后重新读一次**全局量拿到的。别的核在这两句
+   *     之间插进来加一次，本条就会把**别人的号**写进自己的 seq：
+   *     两条记录认领同一个序号。现在 seq 直接用取加的返回值，
+   *     谁加的谁用，不再回头读。 */
 
   {
     uint32_t pending = g_faultq_total - g_faultq_read;
+    uint32_t n;                  /* 本条的事件号（从 1 起），**唯一** */
     uint32_t slot;
+    uint32_t lost;
 
     if (pending >= ORT_FAULTQ_SIZE)
       {
@@ -794,23 +821,65 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
          *
          * 为什么丢最旧的而不是拒绝新的：监督者要处理的是"现在出了什么事"，
          * 陈旧事件的价值最低。丢新的会让监督者永远滞后。
+         *
+         * ⚠️ 这里的 `g_faultq_read++` 就是 R3：**生产者改消费者的游标**。
+         *    本轮没动它 —— 见末尾说明。
          */
 
         g_faultq_read++;
-        g_faultq_dropped++;
+        lost = __atomic_fetch_add(&g_faultq_dropped, 1u,
+                                  __ATOMIC_SEQ_CST) + 1u;
+      }
+    else
+      {
+        lost = __atomic_load_n(&g_faultq_dropped, __ATOMIC_RELAXED);
       }
 
-    slot = g_faultq_total % ORT_FAULTQ_SIZE;
+    /* ★ 先取号（原子），再由号算格 —— 而不是先算格再加号。
+     *
+     *   顺序反过来就有一个必然的窗口：两个核算出**同一格**，
+     *   然后各写各的，后写的把先写的整条盖掉。 */
 
-    g_faultq_total++;
+    n    = __atomic_fetch_add(&g_faultq_total, 1u, __ATOMIC_SEQ_CST) + 1u;
+    slot = (n - 1u) % ORT_FAULTQ_SIZE;
 
-    g_faultq[slot].seq    = g_faultq_total;
-    g_faultq[slot].lost   = g_faultq_dropped;
+    /* ★ 载荷先写，**seq 最后写**（release）—— seq 是"这条可用"的发布点。
+     *
+     *   反过来写的话，消费者可能看到一个**有效 seq + 半截载荷**，
+     *   而那正是最难查的一类错：记录看着是好的，字段却还是上一条的。
+     *   （本轮把 seq 挪到最后；彻底解决还要读者配合，见末尾。） */
+
+    g_faultq[slot].lost   = lost;
     g_faultq[slot].victim = victim;
     g_faultq[slot].pc     = pc;
     g_faultq[slot].addr   = addr;
     g_faultq[slot].faults = faults;
+
+    __atomic_store_n(&g_faultq[slot].seq, n, __ATOMIC_RELEASE);
   }
+
+  /* ── 这一段**仍然不干净**：R2 / R3 / R5 ──────────────────────────────
+   *
+   * ★ 上面只根治了 R1 和 R4（写-写竞争，原子取加即可）。
+   *   下面三条**原样留着**，别以为改完了：
+   *
+   *   R3  生产者做 `g_faultq_read++` —— 它改的是**消费者的游标**。
+   *       两个核同时丢最旧，或生产者与消费者的 `read++` 撞上，
+   *       都会让游标少走一格：消费者于是会**重复读到同一条**
+   *       （序号不增反平），或者跳过一个自己没读过的位置。
+   *
+   *   R2  `g_faultq[slot].seq` 虽然挪到了最后写，但**载荷**仍是
+   *       逐字段写的。消费者若在两半之间抄，就会拿到
+   *       "新 seq + 旧载荷"。要根治得让读者**抄写前后各读一次 seq**，
+   *       不一致就重来 —— 那要改 `ort_fault_read`，本轮没做。
+   *
+   *   R5  同 R2 的另一面：消费者抄一条**正在被写**的记录。
+   *
+   *   为什么不一并改掉：R3 一改，`read` 的语义就从"生产者与消费者
+   *   共享的游标"变成"消费者私有"，溢出检测和账目规则**全都要重写**，
+   *   判据也要跟着换。那是独立的一轮，改一半比不改更危险 ——
+   *   因为现有判据（末序 == 各生产者自报产量之和）会掩盖它。
+   */
 
   /* 监督者没注册，或故障的就是监督者自己 —— 无人可通知 */
 
