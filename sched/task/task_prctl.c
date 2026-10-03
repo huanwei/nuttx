@@ -158,6 +158,16 @@ int prctl(int option, ...)
           return ort_state_get(buf, len);
         }
 
+      case PR_GET_ORT_STATE_SEQ:
+        {
+          /* [ORT] 某域发布过多少次。纯标量，不碰用户指针。
+           *
+           * 权限在实现里查（只有监督者能调）—— 见 ort_state_seq()。
+           */
+
+          return ort_state_seq((int)va_arg(ap, int));
+        }
+
       case PR_GET_ORT_CAPS:
         {
           /* [ORT] 本平台的能力位。直接返回掩码，不碰用户指针。

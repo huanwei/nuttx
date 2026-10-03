@@ -65,6 +65,12 @@ int ort_supervisor_reset(void);
 int ort_state_put(FAR const void *buf, size_t len);
 int ort_state_get(FAR void *buf, size_t len);
 
+/* 某个域发布过多少次。**只给监督者** —— 用于反向证伪容器的
+ * `protocol` 声明（声明了会发布，但槽一直是空的）。
+ * 返回发布次数；0 = 从未发布；负 = errno。 */
+
+int ort_state_seq(int domain);
+
 /* 故障事件队列：取下一条未读。>0 = seq；0 = 暂无；-EPERM = 不是监督者 */
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);

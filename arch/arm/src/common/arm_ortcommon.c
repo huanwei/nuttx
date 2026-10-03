@@ -66,7 +66,8 @@
 
 struct ort_state_slot_s
 {
-  uint32_t seq;                      /* 发布序号；0 = 从未发布 */
+  uint32_t seq;                      /* 当前快照的序号；0 = 没有有效快照 */
+  uint32_t pubs;                     /* **累计**发布次数；故障作废时不清零 */
   uint32_t len;                      /* 有效字节数 */
   uint8_t  data[ORT_STATE_MAX];
 };
@@ -124,10 +125,80 @@ void ort_state_invalidate(int domain)
 
   flags = up_irq_save();
 
-  g_ort_state[domain].seq = 0;   /* seq == 0 即"从未发布" */
+  g_ort_state[domain].seq = 0;   /* seq == 0 即"当前没有可接续的快照" */
   g_ort_state[domain].len = 0;
 
+  /* ★ pubs（累计发布次数）**刻意不清零**。
+   *
+   *   它回答的是另一个问题："这个容器到底发布过没有" ——
+   *   而作废一个快照并不能让"它发布过"这件事变成没发生过。
+   *
+   *   把两者混起来会造出一个**假阳性**（实测踩过）：
+   *   容器故障 → 内核作废槽 → 监督者还没来得及消费故障事件，
+   *   就先看到"槽是空的" → 判定"它没实现发布"。
+   *   而它明明一直在发布，只是刚死。
+   *
+   *   用累计计数之后，判据变成"**从来**没发布过" ——
+   *   这个结论不受作废影响，也就不受事件消费顺序影响。 */
+
   up_irq_restore(flags);
+}
+
+/****************************************************************************
+ * Name: ort_state_seq
+ *
+ * Description:
+ *   查询**指定域**发布过多少次 —— 只有监督者能调。
+ *
+ *   ★ 为什么需要它（这是"声明可信度"问题的正解之一）：
+ *
+ *   manifest 里的 `protocol = 1` 是**声明**，不是事实 ——
+ *   容器没实现发布，监督者无从知道，除非它能从外部看见"发布"这件事。
+ *
+ *   监督者不能读容器内存（读了也不能信，见公理 S1），但它可以问内核：
+ *   **那个域的状态槽被写过没有**。槽按域索引、只有该域的容器能写、
+ *   监督者能查 —— 于是"这个容器到底发布没发布"变成了一个
+ *   **监督者单方面可判定**的事实。这正是公理 S1 要的形态：
+ *   不依赖失效组件的自述。
+ *
+ *   于是 protocol 的声明可以被**反向证伪**：
+ *     声明 protocol=1 + 健康运行超过启动窗口 + 槽还是空的  →  没实现。
+ *
+ * ★ 不给容器这个接口：容器能读别人的发布计数是没必要的旁路，
+ *   而它自己的发布它自己清楚。
+ *
+ * ★ 返回的是**累计**发布次数，故障作废**不清零** —— 见 invalidate 的说明：
+ *   判据要的是"**从来**没发布过"，而不是"现在槽是空的"。
+ *
+ * Returned Value:
+ *   累计发布次数（0 = 从来没发布过）；负 errno。
+ *
+ ****************************************************************************/
+
+int ort_state_seq(int domain)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+  irqstate_t flags;
+  uint32_t seq;
+
+  if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  if (domain < 0 || domain >= ORT_STATE_SLOTS)
+    {
+      return -EINVAL;
+    }
+
+  flags = up_irq_save();
+  seq = g_ort_state[domain].pubs;
+  up_irq_restore(flags);
+
+  /* 计数只增不减，理论上会绕回；压到 INT_MAX 免得某天变成负数
+   * 被调用者当成错误。100 ms 一次发布要跑 6 年才到那里。 */
+
+  return (seq > (uint32_t)INT_MAX) ? INT_MAX : (int)seq;
 }
 
 int ort_state_put(FAR const void *buf, size_t len)
@@ -150,6 +221,7 @@ int ort_state_put(FAR const void *buf, size_t len)
   memcpy(g_ort_state[slot].data, buf, len);
   g_ort_state[slot].len = (uint32_t)len;
   g_ort_state[slot].seq++;
+  g_ort_state[slot].pubs++;
 
   up_irq_restore(flags);
   return OK;
