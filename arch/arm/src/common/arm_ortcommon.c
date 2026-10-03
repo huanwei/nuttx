@@ -102,6 +102,34 @@ static int ort_state_slot(void)
   return domain;
 }
 
+/****************************************************************************
+ * Name: ort_state_invalidate
+ *
+ * Description:
+ *   作废某个域的状态槽 —— 下一次 GET 会返回 -ENOENT，
+ *   于是接替者从冷态开始（COLD_START）。
+ *
+ *   由 ort_fault_notify() 在容器故障时调用，见那里的说明。
+ *
+ ****************************************************************************/
+
+void ort_state_invalidate(int domain)
+{
+  irqstate_t flags;
+
+  if (domain < 0 || domain >= ORT_STATE_SLOTS)
+    {
+      return;
+    }
+
+  flags = up_irq_save();
+
+  g_ort_state[domain].seq = 0;   /* seq == 0 即"从未发布" */
+  g_ort_state[domain].len = 0;
+
+  up_irq_restore(flags);
+}
+
 int ort_state_put(FAR const void *buf, size_t len)
 {
   int slot = ort_state_slot();
@@ -270,6 +298,38 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 {
   union sigval value;
   int ret;
+
+  /* ── 作废该容器的状态槽 ────────────────────────────────────────────
+   *
+   * ★ 这一行实现的是 ARINC 653 里 COLD_START 与 WARM_START 的区分。
+   *
+   *   计划内替换（部署）：前身是**正常退出**的 → 状态可信 → 接替者接续。
+   *   故障重启（崩溃后）  ：前身的**状态可能已经被污染**（往往正是它崩的
+   *                        原因）→ 接替者必须从冷态开始。
+   *
+   *   不区分的话，崩溃前的脏状态会被一路传下去 —— 那不是"状态延续"，
+   *   那是**故障传播**。
+   *
+   * ★ 为什么放在这里（而不是监督者里）：
+   *
+   *   ort_fault_notify() 是**三个架构共用的"某容器故障了"的唯一入口**
+   *   （armv7-a 的 abort、armv7-m/armv8-m 的 memfault 都调它）。
+   *   放在这里一处改、三个平台同时生效 —— 而且"这个实例死得不正常"
+   *   这件事**内核最清楚**（它就在故障现场），监督者只能从事件里推断。
+   *
+   * ⚠️ 语义上要留意：这个函数的名字是"notify"，却带了副作用。
+   *    刻意的 —— 作废状态必须与故障事件同生共死，分开写迟早会漏一处。
+   */
+
+  if (victim > 0)
+    {
+      FAR struct tcb_s *vtcb = nxsched_get_tcb(victim);
+
+      if (vtcb != NULL && vtcb->group != NULL)
+        {
+          ort_state_invalidate((int)vtcb->group->tg_ort_domain - 1);
+        }
+    }
 
   /* 入队。先算 lost，再写槽位。 */
 

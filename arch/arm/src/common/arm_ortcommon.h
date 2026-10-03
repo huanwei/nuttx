@@ -41,6 +41,11 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
+/* 作废某个域的状态槽（域号，不是编码值；-1 表示未绑定，会被忽略）。
+ * 由 ort_fault_notify() 在容器故障时调用 —— 故障重启必须是冷启动。 */
+
+void ort_state_invalidate(int domain);
+
 /* 监督者槽位 */
 
 int ort_supervisor_set(pid_t pid);
