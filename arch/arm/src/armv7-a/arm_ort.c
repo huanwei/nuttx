@@ -256,15 +256,26 @@ uint32_t ort_caps(void)
  * Name: ort_container_domain
  *
  * Description:
- *   ARMv7-A 上「容器」= 进程 + 它的地址空间，没有"内存域"这个维度。
- *   恒返回 -1（未绑定）。
+ *   ARMv7-A 上「容器」= 进程 + 它的地址空间，没有"内存域"这个维度 ——
+ *   域号在这里只是个**标签**，不参与强制。
+ *
+ *   但标签仍然是必要的：容器靠它判"我准入完了没有"（跨平台共用的
+ *   准入等待），部署层靠它把容器与 manifest 对上。
+ *   所以这里如实返回 ort_container_bind() 记下的值，
+ *   而不是恒返回 -1。
+ *
+ *   未绑定返回 -1（编码 0）—— 与 MPU 侧的语义一致。
  *
  ****************************************************************************/
 
 int ort_container_domain(FAR struct task_group_s *group)
 {
-  UNUSED(group);
-  return -1;
+  if (group == NULL || group->tg_ort_domain == 0)
+    {
+      return -1;
+    }
+
+  return (int)group->tg_ort_domain - 1;
 }
 
 /****************************************************************************
@@ -292,17 +303,34 @@ int ort_container_bind(pid_t pid, int domain)
       return -EPERM;
     }
 
-  /* 仍然校验目标存在 —— 让调用者能发现"绑了个不存在的容器" */
+  /* 校验目标存在 —— 让调用者能发现"绑了个不存在的容器" */
 
-  if (domain >= 0)
+  tcb = nxsched_get_tcb(pid);
+  if (tcb == NULL || tcb->group == NULL)
     {
-      tcb = nxsched_get_tcb(pid);
-      if (tcb == NULL)
-        {
-          return -ESRCH;
-        }
+      return -ESRCH;
     }
 
+  if (domain < 0 || domain > 254)
+    {
+      return -EINVAL;
+    }
+
+  /* ★ 域号在 ARMv7-A 上**不参与强制**（隔离由地址空间天然给出），
+   *   但仍然要**记录**下来。为什么不能像原来那样返回 OK 就走：
+   *
+   *   容器靠 `while (prctl(PR_GET_ORT_DOMAIN) < 0)` 判"我准入完了没有" ——
+   *   这是**跨平台共用**的准入等待（见 ortsup 的 ort_container_main）。
+   *   如果 MMU 侧因为"域是空的"就永远返回 -1，同一份容器代码在 ORT-A 上
+   *   会一直等到超时然后退出 —— 而监督者那边看起来只是"容器起不来"。
+   *
+   *   部署层也需要它：把运行中的容器和 manifest 里的那一项对上。
+   *
+   *   编码沿用 tg_ort_domain 的既有契约（0 = 未绑定，域 n 存为 n+1），
+   *   与 MPU 侧完全一致 —— 见 include/nuttx/sched.h 里那段说明。
+   */
+
+  tcb->group->tg_ort_domain = (uint8_t)(domain + 1);
   return OK;
 }
 
