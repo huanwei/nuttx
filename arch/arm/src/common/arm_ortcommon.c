@@ -845,7 +845,17 @@ int ort_fault_inject(int count)
 {
   int i;
 
-  if (nxsched_self() == NULL || nxsched_self()->pid != g_supervisor)
+  /* ★ 权限：**任何任务**都能注入 —— 与其它接口"只有监督者"的规矩相反。
+   *
+   *   为什么这里要反着来：验收 R3（写者改读者游标）与 R2/R5（读到
+   *   写了一半的记录）需要**生产者与消费者同时**在临界区里。
+   *   如果注入者只能是监督者，那它注入时消费者必然阻塞着 ——
+   *   两条路根本不会交错，也就永远验不到。
+   *
+   *   所以注入者必须是**另一个任务**。这在一个"仅原型"的门
+   *   （CONFIG_ORT_SUPERVISOR_RESET）后面，产品构建里这个符号不存在。 */
+
+  if (nxsched_self() == NULL)
     {
       return -EPERM;
     }
