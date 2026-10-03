@@ -814,6 +814,57 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
     }
 }
 
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+/****************************************************************************
+ * Name: ort_fault_inject
+ *
+ * Description:
+ *   测试注入点：一口气产生 count 条故障事件，**绕过容器重启**。
+ *
+ *   ★ 为什么需要它（§三·补三十二·补 §7）：
+ *
+ *   验收故障队列的竞争，缺的不是"让分支被执行"，而是**速率**。
+ *   真实故障率卡在重启路径上（重启一次 = spawn ELF + 等准入 ≈ 2 秒），
+ *   而监督者每 5 ms 排空一次 —— 生产者比消费者慢 300 倍，
+ *   两者几乎不可能同时待在临界区里，所以 R1/R3 这类竞争
+ *   **碰不到**，而"碰不到"看起来和"不存在"完全一样。
+ *
+ *   这里在**一次系统调用里**连续产生 count 条事件：监督者此刻正阻塞
+ *   在这个调用上，根本没机会排空 —— 于是 16 格的环**必然溢出**，
+ *   溢出/丢弃/记账那条从来没被走到的路，这一次必然被走到。
+ *
+ *   ⚠️ 只在 CONFIG_ORT_SUPERVISOR_RESET（仅原型）下编译进来 ——
+ *      产品构建里不存在这个符号。与监督者槽位复位同一个门。
+ *
+ *   victim 用 0：内核查不到对应的 tcb，于是不会去作废谁的状态槽 ——
+ *   这条路径**只压事件队列**，不扰动状态机。
+ *
+ ****************************************************************************/
+
+int ort_fault_inject(int count)
+{
+  int i;
+
+  if (nxsched_self() == NULL || nxsched_self()->pid != g_supervisor)
+    {
+      return -EPERM;
+    }
+
+  if (count < 1 || count > 100000)
+    {
+      return -EINVAL;
+    }
+
+  for (i = 0; i < count; i++)
+    {
+      ort_fault_notify(0, 0xdead0000u + (uintptr_t)i,
+                       0xbeef0000u + (uintptr_t)i, (uint32_t)(i + 1));
+    }
+
+  return count;
+}
+#endif /* CONFIG_ORT_SUPERVISOR_RESET */
+
 int ort_fault_read(FAR struct ort_faultrec_s *rec)
 {
   uint32_t pending;

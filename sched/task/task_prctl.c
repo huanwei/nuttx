@@ -176,6 +176,13 @@ int prctl(int option, ...)
         }
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
+      case PR_ORT_TEST_FAULT:
+        {
+          /* [ORT] ⚠️ 仅原型测试：注入故障事件，压故障队列。见 <sys/prctl.h>。 */
+
+          return ort_fault_inject((int)va_arg(ap, int));
+        }
+
       case PR_ORT_DEPLOY_RESET:
         {
           ort_deploy_reset();

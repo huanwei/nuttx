@@ -264,6 +264,23 @@
  */
 #define PR_SET_ORT_DEPLOY    16
 #define PR_ORT_DEPLOY_RESET  21   /* ⚠️ 仅原型测试，同 PR_ORT_SUPERVISOR_RESET */
+
+/* [ORT] ⚠️ **仅原型测试**：一口气注入 count 条故障事件（绕过容器重启）
+ *
+ *   n = prctl(PR_ORT_TEST_FAULT, int count);
+ *
+ * ★ 存在的理由：验收故障事件队列的竞争，缺的是**速率**。
+ *   真实故障率卡在重启路径上（≈2 秒一次），而监督者每 5 ms 排空 ——
+ *   生产者比消费者慢 300 倍，两者几乎不可能同时进临界区，
+ *   于是"碰不到"和"不存在"看起来一模一样。
+ *
+ *   一次调用里连续产生 count 条 → 监督者此刻正阻塞在这个调用上，
+ *   没机会排空 → 16 格的环**必然溢出** → 溢出那条路必然被走到。
+ *
+ * ⚠️ 与 PR_ORT_SUPERVISOR_RESET 同一个门（CONFIG_ORT_SUPERVISOR_RESET）：
+ *    产品构建里不存在这个符号。count 上限 100000。
+ */
+#define PR_ORT_TEST_FAULT    23
 #define PR_ORT_CFG_ALIVE     22   /* 代理心跳：与内容变没变无关 */
 #define PR_ORT_CFG_PUT       17
 #define PR_GET_ORT_CFG_SEQ   18

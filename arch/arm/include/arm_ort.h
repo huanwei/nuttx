@@ -97,6 +97,14 @@ int ort_cfg_seq(void);
 int ort_cfg_tick(void);
 int ort_cfg_get(FAR void *buf, size_t cap);
 
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+/* ⚠️ 测试注入点：一口气产生 count 条故障事件，绕过容器重启。
+ * 为什么需要速率而不是"把环改小"，见 arm_ortcommon.c 里的长注释。
+ * 产品构建里不存在。 */
+
+int ort_fault_inject(int count);
+#endif
+
 /* 故障事件队列：取下一条未读。>0 = seq；0 = 暂无；-EPERM = 不是监督者 */
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
