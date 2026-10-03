@@ -645,10 +645,15 @@ static bool  g_supervisor_pinned;
 
 #define ORT_FAULTQ_SIZE  16
 
+/* 读者被写穿时的重试上限。一次写只有几条指令，64 次足够到
+ * "打光就说明这一格在被疯狂重写"的程度。 */
+
+#define ORT_FAULTQ_RETRIES  64
+
 static struct ort_faultrec_s g_faultq[ORT_FAULTQ_SIZE];
 static uint32_t g_faultq_total;     /* 产生的事件总数（= 最后一条的 seq） */
 static uint32_t g_faultq_read;      /* 已被监督者取走的条数 */
-static uint32_t g_faultq_dropped;   /* 累计丢弃条数 */
+static uint32_t g_faultq_dropped;   /* 累计丢弃条数 —— **只由消费者累加** */
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 /* ⚠️ **仅原型测试**：故障通知信号的总开关（默认开）。
@@ -727,6 +732,19 @@ int ort_supervisor_set(pid_t pid)
   g_faultq_read    = 0;
   g_faultq_dropped = 0;
 
+  /* ★ 槽位里的 seq 也必须清 —— 它现在是"这条可用"的发布点，
+   *   留着上一任的号，新监督者会把一条**陈年记录**当成新的读走。
+   *   （改发布协议之前这里不用清：那时靠 read 游标界定有效性。） */
+
+  {
+    int i;
+
+    for (i = 0; i < ORT_FAULTQ_SIZE; i++)
+      {
+        g_faultq[i].seq = 0;
+      }
+  }
+
   syslog(LOG_INFO, "[ORT] supervisor pinned: pid=%d sig=%d\n",
          pid, ORT_SIGFAULT);
   return OK;
@@ -789,9 +807,8 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
    *   它会被异常上下文调用 —— 同一核在持锁时触发 abort，处理程序
    *   就会永远自旋，那比丢一条事件严重得多。
    *
-   *   本轮先修**两条已被实测确认的**（R1 / R4），都是纯写-写竞争，
-   *   用不阻塞的原子取加即可根治。**剩下的 R2/R3/R5 仍然在** ——
-   *   见本节末尾的说明，不要以为这一段已经干净了。
+   *   五条现在**全部处理完**（R1/R4 用原子取加，R2/R3/R5 靠
+   *   "游标单一写者 + 作废-写-发布"两条协议）。逐条见下。
    *
    *   R1（已确认：6.25% / 2.67% 的序号凭空消失）
    *     `g_faultq_total++` 是读-改-写。两个核同时读到同一个值，
@@ -810,30 +827,30 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
    *     谁加的谁用，不再回头读。 */
 
   {
-    uint32_t pending = g_faultq_total - g_faultq_read;
+    FAR struct ort_faultrec_s *s;
     uint32_t n;                  /* 本条的事件号（从 1 起），**唯一** */
     uint32_t slot;
-    uint32_t lost;
 
-    if (pending >= ORT_FAULTQ_SIZE)
-      {
-        /* 队列满 —— 丢掉**最旧的**一条。
-         *
-         * 为什么丢最旧的而不是拒绝新的：监督者要处理的是"现在出了什么事"，
-         * 陈旧事件的价值最低。丢新的会让监督者永远滞后。
-         *
-         * ⚠️ 这里的 `g_faultq_read++` 就是 R3：**生产者改消费者的游标**。
-         *    本轮没动它 —— 见末尾说明。
-         */
-
-        g_faultq_read++;
-        lost = __atomic_fetch_add(&g_faultq_dropped, 1u,
-                                  __ATOMIC_SEQ_CST) + 1u;
-      }
-    else
-      {
-        lost = __atomic_load_n(&g_faultq_dropped, __ATOMIC_RELAXED);
-      }
+    /* ★★ R3 的根治点：**这里曾经有一句 `g_faultq_read++`。**
+     *
+     *   它让生产者去推**消费者的游标** —— 两个核同时丢最旧、
+     *   或生产者与消费者同时 `read++`，都会丢掉一次加法，
+     *   游标于是**少走一格**：消费者会重复读到同一条记录。
+     *   实测就是这样：1395 / 1072 条异常，**全部卡在同一个号**上
+     *   （手册 §三·补三十二·八补 §3.2）。
+     *
+     *   现在 `g_faultq_read` **只有消费者会写**。一个写者 → 不可能
+     *   丢更新 → 游标只增不减，卡住从定义上消失。
+     *
+     * ★ 删掉那句之后，生产者**一次都不碰 `read`** ——
+     *   连"这一格原来的记录被读走了没有"这个判断也一并删了。
+     *   因为那个判断本身是错的：消费者的游标会**跳**（见
+     *   `ort_fault_read`），被跳过的记录在生产者眼里却是"已消费"。
+     *   实测在**单生产者对照**里就偏了 —— 而对照里丢更新物理上
+     *   不可能，所以偏差只能来自这个判断本身。
+     *
+     *   丢弃改由消费者记账：**"跳过"是消费者自己做的动作，
+     *   只有它数得准。** 又一个"一个标志位只能回答一个问题"。 */
 
     /* ★ 先取号（原子），再由号算格 —— 而不是先算格再加号。
      *
@@ -843,42 +860,47 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
     n    = __atomic_fetch_add(&g_faultq_total, 1u, __ATOMIC_SEQ_CST) + 1u;
     slot = (n - 1u) % ORT_FAULTQ_SIZE;
 
-    /* ★ 载荷先写，**seq 最后写**（release）—— seq 是"这条可用"的发布点。
+    s = &g_faultq[slot];
+
+    /* ★ 发布协议：**先作废，再写载荷，最后发布**。
      *
-     *   反过来写的话，消费者可能看到一个**有效 seq + 半截载荷**，
-     *   而那正是最难查的一类错：记录看着是好的，字段却还是上一条的。
-     *   （本轮把 seq 挪到最后；彻底解决还要读者配合，见末尾。） */
+     *   只把 seq 挪到最后写是不够的 —— 写入期间格子里仍挂着**上一条
+     *   的合法 seq**，读者会拿着它把半截载荷当成完整记录抄走，
+     *   而且抄完再读 seq 还是那个值，**校验通不过**（它没变）。
+     *   所以必须先写 0 把格子作废。
+     *
+     *   读者据此：s1 == 0 → "正在写"，重来；
+     *             抄完 s2 != s1 → 被写穿，重来。 */
 
-    g_faultq[slot].lost   = lost;
-    g_faultq[slot].victim = victim;
-    g_faultq[slot].pc     = pc;
-    g_faultq[slot].addr   = addr;
-    g_faultq[slot].faults = faults;
+    __atomic_store_n(&s->seq, 0, __ATOMIC_RELEASE);
 
-    __atomic_store_n(&g_faultq[slot].seq, n, __ATOMIC_RELEASE);
+    s->lost   = 0;      /* ★ 由**读者**填 —— 见 ort_fault_read 的说明 */
+    s->victim = victim;
+    s->pc     = pc;
+    s->addr   = addr;
+    s->faults = faults;
+
+    __atomic_store_n(&s->seq, n, __ATOMIC_RELEASE);
   }
 
-  /* ── 这一段**仍然不干净**：R2 / R3 / R5 ──────────────────────────────
+  /* ── R2 / R3 / R5 是怎么没的（对照着上面那五条看）─────────────────
    *
-   * ★ 上面只根治了 R1 和 R4（写-写竞争，原子取加即可）。
-   *   下面三条**原样留着**，别以为改完了：
+   * R3（生产者推消费者游标）
+   *   生产者那句 `g_faultq_read++` 删了。现在 `read` **只有一个写者**
+   *   —— 消费者自己 —— 所以它不可能丢更新，游标只增不减。
    *
-   *   R3  生产者做 `g_faultq_read++` —— 它改的是**消费者的游标**。
-   *       两个核同时丢最旧，或生产者与消费者的 `read++` 撞上，
-   *       都会让游标少走一格：消费者于是会**重复读到同一条**
-   *       （序号不增反平），或者跳过一个自己没读过的位置。
+   * R2 / R5（读者抄到写了一半的记录）
+   *   两条合起来是一个问题：**读者凭什么知道一条记录是完整的**。
+   *   光把 seq 挪到最后写不够 —— 写入期间格子里挂着上一条的**合法**
+   *   seq，读者拿着它把半截载荷抄走，抄完再读 seq 还是那个值，
+   *   校验**看不出任何异常**。
+   *   所以生产者先写 0 把格子作废，读者看到 0 就重来；
+   *   抄完再读一次 seq，变了（被写穿）也重来。
    *
-   *   R2  `g_faultq[slot].seq` 虽然挪到了最后写，但**载荷**仍是
-   *       逐字段写的。消费者若在两半之间抄，就会拿到
-   *       "新 seq + 旧载荷"。要根治得让读者**抄写前后各读一次 seq**，
-   *       不一致就重来 —— 那要改 `ort_fault_read`，本轮没做。
-   *
-   *   R5  同 R2 的另一面：消费者抄一条**正在被写**的记录。
-   *
-   *   为什么不一并改掉：R3 一改，`read` 的语义就从"生产者与消费者
-   *   共享的游标"变成"消费者私有"，溢出检测和账目规则**全都要重写**，
-   *   判据也要跟着换。那是独立的一轮，改一半比不改更危险 ——
-   *   因为现有判据（末序 == 各生产者自报产量之和）会掩盖它。
+   * ★ 这三条与 R1/R4 不是一类问题：R1/R4 是**计数器丢更新**，
+   *   换个加法就行；R2/R3/R5 是**协议没定义清楚**"什么算一条可读的记录"。
+   *   前者是补丁，后者是协议 —— 把补丁当协议用，就会留下
+   *   "看着像好了、其实只是没撞上"的那一类。
    */
 
   /* 监督者没注册，或故障的就是监督者自己 —— 无人可通知 */
@@ -1011,7 +1033,7 @@ int ort_fault_signal_set(int signals)
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec)
 {
-  uint32_t pending;
+  int retry;
 
   /* ★ 只有监督者能读 */
 
@@ -1025,16 +1047,84 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec)
       return -EINVAL;
     }
 
-  pending = g_faultq_total - g_faultq_read;
-  if (pending == 0)
+  for (retry = 0; retry < ORT_FAULTQ_RETRIES; retry++)
     {
-      return 0;                 /* 暂无新事件 */
+      FAR struct ort_faultrec_s *s;
+      uint32_t rd;
+      uint32_t tot;
+      uint32_t s1;
+      uint32_t s2;
+
+      rd  = __atomic_load_n(&g_faultq_read, __ATOMIC_RELAXED);
+      tot = __atomic_load_n(&g_faultq_total, __ATOMIC_ACQUIRE);
+
+      if (tot <= rd)
+        {
+          return 0;                             /* 暂无新事件 */
+        }
+
+      s  = &g_faultq[rd % ORT_FAULTQ_SIZE];
+      s1 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+
+      /* 0 = 生产者正在写这一格（见发布协议）。重来。 */
+
+      if (s1 == 0)
+        {
+          continue;
+        }
+
+      /* 抄。抄完再读一次 seq：变了说明抄的过程中被写穿了。 */
+
+      *rec = *s;
+
+      s2 = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
+      if (s1 != s2 || rec->seq != s1)
+        {
+          continue;
+        }
+
+      /* ★★ 丢弃只能由**消费者**记账 —— 这是本轮实现时才看清的一件事。
+       *
+       *   原版是生产者数的：写第 n 号时看"第 n-SIZE 号被读走没有"。
+       *   但消费者的游标现在会**跳**（它落到这一格里最新的那条），
+       *   于是一条被跳过的记录，在生产者眼里 `read >= 它的号` ——
+       *   看起来"已消费"。生产者的账立刻偏小，而且是**危险的方向**：
+       *   报告丢得少，监督者会以为事件是连着的。
+       *
+       *   实测就是这么烧出来的：单生产者对照里 Δlost 稳定小于缺口。
+       *
+       *   真相很简单：**"跳过"是消费者自己做的动作，只有它数得准。**
+       *   生产者不该碰这个数 —— 又一个"一个标志位只能回答一个问题"。
+       *
+       *   `s1 - rd - 1` 就是这一跳跨过的号数。 */
+
+      __atomic_fetch_add(&g_faultq_dropped, s1 - rd - 1u, __ATOMIC_RELAXED);
+
+      /* ★★ 游标跟到**实际读到的那个号**，而不是 `rd + 1`。
+       *
+       *   这是 R3 修好之后必须改的一处：生产者不再替消费者跳号，
+       *   所以消费者落到的位置可能比自己的游标**大很多**
+       *   （中间那些号已经被覆盖掉了）。游标要是只加一，
+       *   它就会在同一格上反复读 —— 正是上一轮实测到的那个"卡住"。
+       *
+       *   `s1` 就是这条记录的号，而它一定是"读到的最后一条"，
+       *   所以游标直接落到它上面。 */
+
+      __atomic_store_n(&g_faultq_read, s1, __ATOMIC_RELEASE);
+
+      /* `lost` 在返回前才填 —— 生产者写它的时候还不知道丢了多少。 */
+
+      rec->lost = __atomic_load_n(&g_faultq_dropped, __ATOMIC_RELAXED);
+
+      return (int)s1;
     }
 
-  *rec = g_faultq[g_faultq_read % ORT_FAULTQ_SIZE];
-  g_faultq_read++;
+  /* 重试打光：说明这一格正在被反复写穿。**返回 0 而不是错误** ——
+   * 调用者是周期性的监督循环，下一轮自然会再来；
+   * 报错反而会让它以为通道坏了。重试上限 64 次，
+   * 而一次写只有几条指令，打光在实践中不该发生。 */
 
-  return (int)rec->seq;
+  return 0;
 }
 
 #endif /* CONFIG_ORT_CONTAINER */
