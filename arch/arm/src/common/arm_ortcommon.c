@@ -650,6 +650,31 @@ static uint32_t g_faultq_total;     /* 产生的事件总数（= 最后一条的
 static uint32_t g_faultq_read;      /* 已被监督者取走的条数 */
 static uint32_t g_faultq_dropped;   /* 累计丢弃条数 */
 
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+/* ⚠️ **仅原型测试**：故障通知信号的总开关（默认开）。
+ *
+ * ★ 它是**对照实验**用的，不是产品开关。
+ *
+ *   压故障队列的装置跑起来会让内核 assert（`irq/irq_csection.c:205`，
+ *   `enter_critical_section()` 里 `current_task(cpu) == NULL`）。
+ *   但那个装置同时压了三样东西：
+ *     1. 队列的计数器与环（R1..R5 住的地方）
+ *     2. **每条事件一次 `nxsig_queue`** —— 百万级信号投递
+ *     3. 百万级 `prctl` 系统调用往返
+ *
+ *   要归因就得一次只留一样。这个开关把第 2 样单独摘掉：
+ *   关掉之后**队列逻辑一字不改**（照常入队、照常计数、照常丢最旧），
+ *   只是不再叫醒监督者。
+ *
+ *   做成**运行期开关**而不是编译期宏：两次对照必须用**同一个二进制**，
+ *   否则"换了个编译"和"换了个变量"分不开 —— 那正是本项目反复
+ *   栽的那一类。
+ *
+ *   产品构建里不存在（与 PR_ORT_SUPERVISOR_RESET 同一个门）。 */
+
+static bool g_faultq_nosig;
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -794,6 +819,18 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
       return;
     }
 
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+  /* ⚠️ 仅原型测试：信号总开关（对照实验用）。见 g_faultq_nosig 的说明。
+   *
+   * 注意它**只**掐掉通知这一步 —— 上面的入队、计数、丢最旧全都照常走，
+   * 所以队列那一侧的负载一点都不少。 */
+
+  if (g_faultq_nosig)
+    {
+      return;
+    }
+#endif
+
   value.sival_int = (int)victim;
 
   ret = nxsig_queue(g_supervisor, ORT_SIGFAULT, value);
@@ -872,6 +909,34 @@ int ort_fault_inject(int count)
     }
 
   return count;
+}
+
+/****************************************************************************
+ * Name: ort_fault_signal_set
+ *
+ * Description:
+ *   测试对照开关：开关故障通知信号（`nxsig_queue`）的投递。
+ *
+ *   ★ 为什么必须做成**运行期**开关，而不是编译期宏：
+ *     两次对照要用**同一个二进制**。否则"改了个编译选项"和
+ *     "改了个变量"分不开 —— 那正是这个项目反复栽的那一类。
+ *
+ *   ★ 关掉之后队列那一侧的负载**一点没少**：照常入队、照常计数、
+ *     照常丢最旧，只有 `nxsig_queue` 不再被调用。所以它把
+ *     "ORT 故障路径（队列）"和"百万级信号投递"干净地分开。
+ *
+ *   返回开关生效后的状态：1 = 信号开，0 = 信号关。
+ ****************************************************************************/
+
+int ort_fault_signal_set(int signals)
+{
+  g_faultq_nosig = (signals == 0);
+
+  _alert("ORT: fault signal %s by pid=%d "
+         "(PROTOTYPE ONLY — 对照实验用)\n",
+         g_faultq_nosig ? "DISABLED" : "enabled", nxsched_self()->pid);
+
+  return g_faultq_nosig ? 0 : 1;
 }
 #endif /* CONFIG_ORT_SUPERVISOR_RESET */
 

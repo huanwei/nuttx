@@ -281,6 +281,27 @@
  *    产品构建里不存在这个符号。count 上限 100000。
  */
 #define PR_ORT_TEST_FAULT    23
+
+/* [ORT] ⚠️ **仅原型测试**：开关故障通知信号（对照实验用）
+ *
+ *   n = prctl(PR_ORT_TEST_SIGNOFF, int signals);
+ *       signals != 0 → 打开投递；== 0 → 关闭投递
+ *       返回生效后的状态（1 = 开，0 = 关）
+ *
+ * ★ 存在的理由：压故障队列的装置会让内核 assert
+ *   （`irq/irq_csection.c:205`）。但那个装置同时压了三样东西 ——
+ *   队列计数器/环、**每条事件一次 nxsig_queue**、以及百万级 prctl 往返。
+ *   不把它们分开，"是什么压垮了内核"就只能靠猜。
+ *
+ *   关掉信号后，队列那一侧的负载**一点没少**（照常入队、照常计数、
+ *   照常丢最旧），所以这一刀恰好切在"队列逻辑"和"信号投递"之间。
+ *
+ * ★ 必须是**运行期**开关：两次对照要跑同一个二进制，
+ *   否则"改了编译"和"改了变量"分不开。
+ *
+ * ⚠️ 与 PR_ORT_SUPERVISOR_RESET 同一个门；产品构建里不存在。
+ */
+#define PR_ORT_TEST_SIGNOFF  24
 #define PR_ORT_CFG_ALIVE     22   /* 代理心跳：与内容变没变无关 */
 #define PR_ORT_CFG_PUT       17
 #define PR_GET_ORT_CFG_SEQ   18

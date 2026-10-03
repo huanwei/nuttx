@@ -103,6 +103,13 @@ int ort_cfg_get(FAR void *buf, size_t cap);
  * 产品构建里不存在。 */
 
 int ort_fault_inject(int count);
+
+/* ⚠️ 测试对照开关：开关故障通知信号（nxsig_queue）的投递。
+ * 关掉后队列逻辑一字不改，只掐通知这一步 —— 用来把
+ * "ORT 故障路径"和"百万级信号投递"分开归因。
+ * 返回生效后的状态：1 = 开，0 = 关。 */
+
+int ort_fault_signal_set(int signals);
 #endif
 
 /* 故障事件队列：取下一条未读。>0 = seq；0 = 暂无；-EPERM = 不是监督者 */

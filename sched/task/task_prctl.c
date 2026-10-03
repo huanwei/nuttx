@@ -188,6 +188,16 @@ int prctl(int option, ...)
           ort_deploy_reset();
           return OK;
         }
+
+      case PR_ORT_TEST_SIGNOFF:
+        {
+          /* [ORT] ⚠️ 仅原型测试：开关故障通知信号。见 <sys/prctl.h>。
+           *
+           * 与注入接口同样**对任何任务开放** —— 它是照实验的旋钮，
+           * 不是安全接口；而且对照实验里拧它的任务往往不是监督者。 */
+
+          return ort_fault_signal_set((int)va_arg(ap, int));
+        }
 #endif
 
       case PR_ORT_CFG_PUT:
