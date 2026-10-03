@@ -64,13 +64,41 @@
 #define ORT_STATE_SLOTS  8
 #define ORT_STATE_MAX    64
 
+/* ★★ seqlock：seq 兼作"写入中"标志（见 §三·补二十九·四补）
+ *
+ *   单核时 put/get 都在 up_irq_save() 里，两者不可能交错，所以
+ *   "撕裂发生不了"。但 `up_irq_save()` 在 SMP 下**只关本核中断** ——
+ *   另一个核照样能跑进同一段 memcpy。
+ *
+ *   实测（4 核 · 压力模式）：读 17 次就撞上撕裂，w0 与 w5 相差 1。
+ *   所以改成 seqlock：
+ *
+ *     偶数 = 稳定；奇数 = 正在写
+ *
+ *   写者把 seq 变成奇数、写完变回偶数；读者首尾各读一次 seq，
+ *   两次相等才认这次拷贝。
+ *
+ *   "读到的字节是不是自洽的"这个判据**在这一层就能判**，
+ *   不需要容器自己算校验和 —— 内核知道它在跟谁抢。
+ */
+
 struct ort_state_slot_s
 {
-  uint32_t seq;                      /* 当前快照的序号；0 = 没有有效快照 */
+  volatile uint32_t seq;             /* 偶数=稳定 / 奇数=写入中；0 = 无快照 */
   uint32_t pubs;                     /* **累计**发布次数；故障作废时不清零 */
   uint32_t len;                      /* 有效字节数 */
   uint8_t  data[ORT_STATE_MAX];
 };
+
+/* 读端重试上限。
+ *
+ * ★ 必须**有界**：seqlock 的读端在写端持续写入时可以一直重试 ——
+ *   而这是一个硬实时系统，无界重试等于无界响应时间。
+ *   用完就如实返回 -EAGAIN，让调用者知道"这次没读到一致快照"，
+ *   而不是返回一份可能撕裂的数据、也不是假装"没有旧状态"。
+ */
+
+#define ORT_SEQLOCK_RETRIES  128
 
 static struct ort_state_slot_s g_ort_state[ORT_STATE_SLOTS];
 
@@ -216,12 +244,20 @@ int ort_state_put(FAR const void *buf, size_t len)
       return -EINVAL;
     }
 
+  /* 本核关中断：写者不会在自己的核上被读者打断，
+   * 于是"写入中"这个窗口只对**别的核**可见 —— 那正是 seqlock 管的。 */
+
   flags = up_irq_save();
+
+  g_ort_state[slot].seq++;               /* → 奇数：写入中 */
+  SMP_WMB();
 
   memcpy(g_ort_state[slot].data, buf, len);
   g_ort_state[slot].len = (uint32_t)len;
-  g_ort_state[slot].seq++;
   g_ort_state[slot].pubs++;
+
+  SMP_WMB();
+  g_ort_state[slot].seq++;               /* → 偶数：完成 */
 
   up_irq_restore(flags);
   return OK;
@@ -231,7 +267,7 @@ int ort_state_get(FAR void *buf, size_t len)
 {
   int slot = ort_state_slot();
   uint32_t n;
-  irqstate_t flags;
+  int retry;
 
   if (slot < 0)
     {
@@ -243,23 +279,46 @@ int ort_state_get(FAR void *buf, size_t len)
       return -EINVAL;
     }
 
-  flags = up_irq_save();
+  /* ★ 读端**不需要关中断** —— 这是 seqlock 相对于锁的地方：
+   *   它不阻塞写者，写者也不阻塞它。代价是可能读到不一致，
+   *   而"首尾 seq 相等"就是**内核自己判定的**一致性判据。
+   *
+   * ★ 三种结果必须互相区分（这是本项目反复踩的那条）：
+   *     >0     读到了一致快照
+   *     -ENOENT 压根没有快照（从未发布 / 故障作废）
+   *     -EAGAIN 有快照，但重试用尽仍没读到一致的
+   *   把 -EAGAIN 混进 -ENOENT（当成"冷启动"）就是把
+   *   "没读到"说成了"没有" —— 又一个 H31。 */
 
-  /* ★ 从未发布过就明确说"没有"，而不是返回 0 字节当成功。
-   *   调用者必须能区分"接续了旧状态"和"没有旧状态可接续" ——
-   *   把这两件事混起来，正是 H31/H32 那类错误的温床。 */
-
-  if (g_ort_state[slot].seq == 0)
+  for (retry = 0; retry < ORT_SEQLOCK_RETRIES; retry++)
     {
-      up_irq_restore(flags);
-      return -ENOENT;
+      uint32_t s1 = g_ort_state[slot].seq;
+
+      if (s1 == 0)
+        {
+          return -ENOENT;          /* 从未发布 / 已被故障作废 */
+        }
+
+      if (s1 & 1u)
+        {
+          continue;                /* 写者正在写这一格 */
+        }
+
+      SMP_RMB();
+
+      n = g_ort_state[slot].len < len ? g_ort_state[slot].len
+                                      : (uint32_t)len;
+      memcpy(buf, g_ort_state[slot].data, n);
+
+      SMP_RMB();
+
+      if (g_ort_state[slot].seq == s1)
+        {
+          return (int)n;           /* 首尾一致 → 这次拷贝自洽 */
+        }
     }
 
-  n = g_ort_state[slot].len < len ? g_ort_state[slot].len : (uint32_t)len;
-  memcpy(buf, g_ort_state[slot].data, n);
-
-  up_irq_restore(flags);
-  return (int)n;
+  return -EAGAIN;
 }
 
 /****************************************************************************
@@ -309,6 +368,7 @@ int ort_state_get(FAR void *buf, size_t len)
 
 struct ort_cfg_slot_s
 {
+  volatile uint32_t seq;             /* seqlock：偶数=稳定 / 奇数=写入中 */
   uint32_t generation;               /* 内容变化的次数；0 = 从未写入 */
   uint32_t tick;                     /* 代理心跳；只增不减 */
   uint32_t len;                      /* 有效字节数 */
@@ -409,8 +469,17 @@ int ort_cfg_put(FAR const void *buf, size_t len)
   changed = (g_ort_cfg.len != len) ||
             memcmp(g_ort_cfg.data, buf, len) != 0;
 
+  /* 与状态槽同一个 seqlock 形状 —— 代理在某个核上写，
+   * 监督者在另一个核上读，两边都不许看到半新半旧。 */
+
+  g_ort_cfg.seq++;
+  SMP_WMB();
+
   memcpy(g_ort_cfg.data, buf, len);
   g_ort_cfg.len  = (uint32_t)len;
+
+  SMP_WMB();
+  g_ort_cfg.seq++;
 
   if (changed)
     {
@@ -502,7 +571,7 @@ int ort_cfg_get(FAR void *buf, size_t cap)
 {
   FAR struct tcb_s *rtcb = nxsched_self();
   uint32_t n;
-  irqstate_t flags;
+  int retry;
 
   if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
     {
@@ -514,19 +583,37 @@ int ort_cfg_get(FAR void *buf, size_t cap)
       return -EINVAL;
     }
 
-  flags = up_irq_save();
+  /* seqlock 读端，与状态槽同一形状。三种结果同样必须区分：
+   *   >0 = 一致快照；-ENOENT = 从来没有；-EAGAIN = 有但没读到一致的。 */
 
-  if (g_ort_cfg.len == 0)
+  for (retry = 0; retry < ORT_SEQLOCK_RETRIES; retry++)
     {
-      up_irq_restore(flags);
-      return -ENOENT;          /* 代理还没送来过任何配置 */
+      uint32_t s1 = g_ort_cfg.seq;
+
+      if (s1 == 0)
+        {
+          return -ENOENT;          /* 代理还没送来过任何配置 */
+        }
+
+      if (s1 & 1u)
+        {
+          continue;
+        }
+
+      SMP_RMB();
+
+      n = g_ort_cfg.len < cap ? g_ort_cfg.len : (uint32_t)cap;
+      memcpy(buf, g_ort_cfg.data, n);
+
+      SMP_RMB();
+
+      if (g_ort_cfg.seq == s1)
+        {
+          return (int)n;
+        }
     }
 
-  n = g_ort_cfg.len < cap ? g_ort_cfg.len : (uint32_t)cap;
-  memcpy(buf, g_ort_cfg.data, n);
-
-  up_irq_restore(flags);
-  return (int)n;
+  return -EAGAIN;
 }
 
 /****************************************************************************
