@@ -71,6 +71,32 @@ int ort_state_get(FAR void *buf, size_t len);
 
 int ort_state_seq(int domain);
 
+/* 部署/O&M 代理槽：首次注册即钉住（与监督者同规则）。
+ * 只有它能写配置槽 —— 容器写一律 -EPERM。 */
+
+int ort_deploy_set(pid_t pid);
+
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+void ort_deploy_reset(void);
+#endif
+
+/* 配置槽。**代理只搬运，校验权在监督者** —— 这里存的是原样字节。
+ *
+ *   put  —— 代理写。generation 只在**内容真变了**时才加。
+ *   alive—— 代理心跳，与内容无关。**必须与 put 分开**：代理读不到源文件时
+ *           没有内容可写，但它还活着 —— 混在一起会造出不实的失联告警。
+ *   seq  —— 监督者读代数：每个控制周期一次标量比较，无 I/O。
+ *   tick —— 监督者读心跳：代理失联必须**可检测**（否则和"配置本来
+ *           就不用变"看起来一模一样，见假设审计 H31）。
+ *   get  —— 监督者取回快照，有界 memcpy。
+ */
+
+int ort_cfg_put(FAR const void *buf, size_t len);
+int ort_cfg_alive(void);
+int ort_cfg_seq(void);
+int ort_cfg_tick(void);
+int ort_cfg_get(FAR void *buf, size_t cap);
+
 /* 故障事件队列：取下一条未读。>0 = seq；0 = 暂无；-EPERM = 不是监督者 */
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);

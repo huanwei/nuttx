@@ -220,6 +220,56 @@
  */
 #define PR_GET_ORT_STATE_SEQ 15
 
+/* [ORT] 部署/O&M 代理：把配置递送从实时控制环里切出去
+ *
+ *   prctl(PR_SET_ORT_DEPLOY);                     代理注册自己（钉住，同监督者规则）
+ *   prctl(PR_ORT_CFG_PUT, const char *buf, size_t len);   代理写入原样字节
+ *   prctl(PR_ORT_CFG_ALIVE);                      代理心跳（每跑一圈一次）
+ *   n = prctl(PR_GET_ORT_CFG_SEQ);                监督者读**代数**（每个控制周期一次）
+ *   n = prctl(PR_GET_ORT_CFG_TICK);               监督者读**心跳**（代理失联检测）
+ *   n = prctl(PR_ORT_CFG_GET, char *buf, size_t cap);     监督者取回快照
+ *
+ * ★ 为什么要切（设计见 proposals/《部署与 O&M 组件设计》）：
+ *
+ *   在此之前监督者每 2 秒自己 fopen manifest 并逐行解析 ——
+ *   也就是**实时控制环里做文件 I/O**。硬实时关心的是最坏耗时，
+ *   而 hostfs / flash 的最坏延迟都不可控。5 ms 周期的控制循环
+ *   不能建立在"读文件很快"这个假设上。
+ *
+ *   切分后：代理（非实时约束）负责搬，监督者每周期只做一次
+ *   **整数比较**；变了才取回快照（有界 memcpy）并**自己校验**。
+ *   控制循环里因此不存在任何不可控的最坏耗时。
+ *
+ * ★ 信任模型：**代理只搬运，校验权在监督者**。
+ *   代理是非实时、可重启、可能被降级的组件 —— 按公理 S1，
+ *   它的输出只能当**输入**看待。所以内核侧不做任何格式校验，
+ *   只存字节；解析与校验仍然只有监督者那一份。
+ *
+ * ★ 权限：容器调这四个接口一律 -EPERM。否则一个被攻陷的容器可以
+ *   给自己放宽 max_restarts、或把别的 CG 的 critical 改成 false。
+ *
+ * ★ 代数（generation）与心跳（tick）是**两个**计数器，而且
+ *   **心跳必须与"写配置"分开**：
+ *     generation —— 只在**内容真变了**时加（内核做比较，代理侧无状态）；
+ *     tick       —— 代理每跑一圈加一次，与内容无关。
+ *   混成一个的话，"代理死了"和"配置本来就不用变"看起来一模一样 ——
+ *   而后者是正常状态。那正是 H31 那一族。
+ *   但反过来，把心跳挂在"写配置"上的话，**代理读不到源文件**（文件被移走、
+ *   介质出错）这种"活着但没东西可写"的情形会被报成"失联" ——
+ *   那是一条不实的告警。告警必须只由它真正想表达的事实触发。
+ *
+ * ⚠️ PR_ORT_CFG_GET 要往用户地址写（槽有 4 KB，塞不进返回值）——
+ *    与 PR_GET_ORT_FAULT / PR_ORT_STATE_* 同一个原型债：
+ *    内核直接按用户指针写，**没有做指针合法性校验**。
+ */
+#define PR_SET_ORT_DEPLOY    16
+#define PR_ORT_DEPLOY_RESET  21   /* ⚠️ 仅原型测试，同 PR_ORT_SUPERVISOR_RESET */
+#define PR_ORT_CFG_ALIVE     22   /* 代理心跳：与内容变没变无关 */
+#define PR_ORT_CFG_PUT       17
+#define PR_GET_ORT_CFG_SEQ   18
+#define PR_GET_ORT_CFG_TICK  19
+#define PR_ORT_CFG_GET       20
+
 /* [ORT] 容器故障通知信号
  *
  * 为什么用 SIGUSR1：CONFIG_SIG_SIGUSR1_ACTION 默认为 n，

@@ -263,6 +263,273 @@ int ort_state_get(FAR void *buf, size_t len)
 }
 
 /****************************************************************************
+ * [ORT] 配置槽：部署/O&M 代理 → 监督者的**唯一**配置通道
+ *
+ * ★ 为什么要有它（设计见 proposals/《部署与 O&M 组件设计》）：
+ *
+ *   在此之前监督者每 2 秒自己 fopen manifest + 逐行解析 ——
+ *   也就是**实时控制环里做文件 I/O**。硬实时关心的是最坏耗时，
+ *   而 hostfs / flash 的最坏延迟都不可控。一个 5 ms 周期的控制循环
+ *   不能建立在"读文件很快"这个假设上。
+ *
+ *   切法：把"搬"和"保证实时"分成两个组件。
+ *     - 部署/O&M 代理（非实时约束）读文件/收下发，把**原样字节**放进槽；
+ *     - 监督者每周期只读一个标量（代数），变了才取回并**自己校验**。
+ *
+ *   Wind River 三层的答案形状相同：VxWorks 653 是 Module OS 在 init 期装载
+ *   配置 + mode manager 分区请求变更；VxWorks 7 是目标上另跑一个 kubelet
+ *   （不参与实时调度）；Studio OTA 是设备侧独立的 eSync client/agent。
+ *   **共同点是实时控制环从不做 I/O。**
+ *
+ * ★ 为什么放内核而不是共享内存：
+ *   ORT-A（MMU）上代理与监督者**地址空间完全独立**，根本没有共享内存可用。
+ *   放内核则监督者侧是一次**有界 memcpy**，无阻塞、大小已知、WCET 可算。
+ *   这与容器状态槽是同一个形状 —— 不是新发明。
+ *
+ * ★ 信任模型：**代理只搬运，校验权在监督者**。
+ *   代理是非实时、可重启、可能被降级的组件，按公理 S1 它的输出只能当
+ *   **输入**看待。所以这里不做任何格式校验 —— 只存字节。
+ *   校验逻辑只有一份，不会出现"代理的规则和监督者的不一致"这种经典漏洞。
+ *
+ * ★ 权限：**容器写不了配置槽**（一律 -EPERM）。否则一个被攻陷的容器
+ *   可以给自己放宽 max_restarts、或把别的 CG 的 critical 改成 false ——
+ *   那是把编排层的信任边界交给被编排的对象。
+ *
+ * ★ 代数与心跳是**两个**计数器（踩过一次的教训的形状，见状态槽的 pubs）：
+ *     generation —— 只在**内容真的变了**时才加。监督者据此决定要不要解析。
+ *     tick       —— 代理每跑一圈就加，**与内容变没变无关**。
+ *   两者混成一个的话，"代理死了"和"配置本来就不用变"看起来一模一样 ——
+ *   而后者是正常状态。那正是 H31 那一族。
+ *
+ * ⚠️ 原型限制：槽是定长 4 KB 单槽、无 CRC。正式实现应按配额定大小、
+ *    带校验（识别撕裂的写入）、并考虑 A/B 双槽做原子切换。
+ ****************************************************************************/
+
+#define ORT_CFG_MAX  4096
+
+struct ort_cfg_slot_s
+{
+  uint32_t generation;               /* 内容变化的次数；0 = 从未写入 */
+  uint32_t tick;                     /* 代理心跳；只增不减 */
+  uint32_t len;                      /* 有效字节数 */
+  uint8_t  data[ORT_CFG_MAX];
+};
+
+static struct ort_cfg_slot_s g_ort_cfg;
+
+static pid_t g_deploy = -1;
+static bool  g_deploy_pinned;
+
+/* 只有钉住的部署代理能写；只有监督者能读/查 */
+
+static bool ort_is_deploy(void)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+
+  return rtcb != NULL && g_deploy_pinned && rtcb->pid == g_deploy;
+}
+
+/****************************************************************************
+ * Name: ort_deploy_set
+ *
+ * Description:
+ *   注册部署/O&M 代理。与监督者槽位同一套规则：**首次注册即钉住**，
+ *   之后别的任务一律 -EBUSY（除非是同一个任务的重复注册）。
+ *
+ *   ★ 为什么不能"原代理退出就允许接管"：那等于把"谁能改配置"
+ *     变成运行期竞争 —— 任何任务只要等代理退出（或把它耗死）
+ *     就能改写整份部署配置，包括别的 CG 的关键等级。
+ *     与监督者槽位是同一个理由，见那里的说明。
+ *
+ ****************************************************************************/
+
+int ort_deploy_set(pid_t pid)
+{
+  if (g_deploy_pinned)
+    {
+      if (pid == g_deploy)
+        {
+          return OK;
+        }
+
+      _alert("ORT: deploy slot is pinned to pid=%d, rejecting pid=%d\n",
+             g_deploy, pid);
+      return -EBUSY;
+    }
+
+  g_deploy        = pid;
+  g_deploy_pinned = true;
+
+  syslog(LOG_INFO, "[ORT] deploy agent pinned: pid=%d\n", pid);
+  return OK;
+}
+
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+void ort_deploy_reset(void)
+{
+  _alert("ORT: deploy slot reset by pid=%d "
+         "(PROTOTYPE ONLY — 正式构建不应存在此路径)\n",
+         nxsched_self()->pid);
+  g_deploy        = -1;
+  g_deploy_pinned = false;
+}
+#endif
+
+/****************************************************************************
+ * Name: ort_cfg_put
+ *
+ * Description:
+ *   部署代理把 manifest 的**原样字节**放进槽（不解析、不校验）。
+ *
+ *   generation **只在内容真的变了**时才加 —— 由内核做比较，
+ *   代理侧因此无状态：它不需要记住上次写了什么。
+ *
+ *   心跳**不在这里**（见 ort_cfg_alive）：代理读不到源文件时没有新内容
+ *   可写，但它还活着 —— 两件事混在一起会造出不实的"失联"告警。
+ *
+ ****************************************************************************/
+
+int ort_cfg_put(FAR const void *buf, size_t len)
+{
+  irqstate_t flags;
+  bool changed;
+
+  if (!ort_is_deploy())
+    {
+      return -EPERM;
+    }
+
+  if (buf == NULL || len == 0 || len > ORT_CFG_MAX)
+    {
+      return -EINVAL;
+    }
+
+  flags = up_irq_save();
+
+  changed = (g_ort_cfg.len != len) ||
+            memcmp(g_ort_cfg.data, buf, len) != 0;
+
+  memcpy(g_ort_cfg.data, buf, len);
+  g_ort_cfg.len  = (uint32_t)len;
+
+  if (changed)
+    {
+      g_ort_cfg.generation++;
+    }
+
+  up_irq_restore(flags);
+  return OK;
+}
+
+/****************************************************************************
+ * Name: ort_cfg_seq / ort_cfg_tick / ort_cfg_get
+ *
+ * Description:
+ *   监督者侧的三次查询。都是**有界的**（前两个是标量，第三个是有界
+ *   memcpy）—— 控制循环里因此不存在任何不可控的最坏耗时。
+ *
+ *   第三个必须要一个用户缓冲区：槽有 4 KB，塞不进返回值。
+ *   ⚠️ 与 PR_GET_ORT_FAULT / PR_ORT_STATE_* 同一个原型债：
+ *      内核直接按用户指针写，**没有做指针合法性校验**。
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: ort_cfg_alive
+ *
+ * Description:
+ *   代理心跳：**与内容变没变无关**，代理每跑一圈调一次。
+ *
+ *   ★ 为什么必须与 put 分开：代理读不到源文件（文件被移走、介质出错）
+ *     时它**没有新内容可写**，但它**还活着**。如果心跳只挂在 put 上，
+ *     这种情形会被上报成"代理失联" —— 那是一条**不实的告警**。
+ *     告警必须只由它真正想表达的事实触发。
+ *
+ ****************************************************************************/
+
+int ort_cfg_alive(void)
+{
+  irqstate_t flags;
+
+  if (!ort_is_deploy())
+    {
+      return -EPERM;
+    }
+
+  flags = up_irq_save();
+  g_ort_cfg.tick++;
+  up_irq_restore(flags);
+  return OK;
+}
+
+int ort_cfg_seq(void)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+  irqstate_t flags;
+  uint32_t v;
+
+  if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  flags = up_irq_save();
+  v = g_ort_cfg.generation;
+  up_irq_restore(flags);
+
+  return (v > (uint32_t)INT_MAX) ? INT_MAX : (int)v;
+}
+
+int ort_cfg_tick(void)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+  irqstate_t flags;
+  uint32_t v;
+
+  if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  flags = up_irq_save();
+  v = g_ort_cfg.tick;
+  up_irq_restore(flags);
+
+  return (v > (uint32_t)INT_MAX) ? INT_MAX : (int)v;
+}
+
+int ort_cfg_get(FAR void *buf, size_t cap)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+  uint32_t n;
+  irqstate_t flags;
+
+  if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  if (buf == NULL || cap == 0)
+    {
+      return -EINVAL;
+    }
+
+  flags = up_irq_save();
+
+  if (g_ort_cfg.len == 0)
+    {
+      up_irq_restore(flags);
+      return -ENOENT;          /* 代理还没送来过任何配置 */
+    }
+
+  n = g_ort_cfg.len < cap ? g_ort_cfg.len : (uint32_t)cap;
+  memcpy(buf, g_ort_cfg.data, n);
+
+  up_irq_restore(flags);
+  return (int)n;
+}
+
+/****************************************************************************
  * Private Data
  ****************************************************************************/
 

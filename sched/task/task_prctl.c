@@ -168,6 +168,58 @@ int prctl(int option, ...)
           return ort_state_seq((int)va_arg(ap, int));
         }
 
+      case PR_SET_ORT_DEPLOY:
+        {
+          /* [ORT] 注册部署/O&M 代理。首次注册即钉住，同监督者规则。 */
+
+          return ort_deploy_set((int)this_task()->pid);
+        }
+
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+      case PR_ORT_DEPLOY_RESET:
+        {
+          ort_deploy_reset();
+          return OK;
+        }
+#endif
+
+      case PR_ORT_CFG_PUT:
+        {
+          /* [ORT] 代理写入 manifest 原样字节。只有钉住的代理能调。
+           *
+           * ⚠️ 同 PR_GET_ORT_FAULT：原型期直接按用户指针读，没做校验。 */
+
+          FAR const void *buf = (FAR const void *)va_arg(ap, uintptr_t);
+          size_t len          = (size_t)va_arg(ap, int);
+
+          return ort_cfg_put(buf, len);
+        }
+
+      case PR_ORT_CFG_ALIVE:
+        {
+          /* [ORT] 代理心跳。只有钉住的代理能调。 */
+
+          return ort_cfg_alive();
+        }
+
+      case PR_GET_ORT_CFG_SEQ:
+        {
+          return ort_cfg_seq();
+        }
+
+      case PR_GET_ORT_CFG_TICK:
+        {
+          return ort_cfg_tick();
+        }
+
+      case PR_ORT_CFG_GET:
+        {
+          FAR void *buf = (FAR void *)va_arg(ap, uintptr_t);
+          size_t cap    = (size_t)va_arg(ap, int);
+
+          return ort_cfg_get(buf, cap);
+        }
+
       case PR_GET_ORT_CAPS:
         {
           /* [ORT] 本平台的能力位。直接返回掩码，不碰用户指针。
