@@ -28,6 +28,7 @@
 #ifndef __ASSEMBLY__
 
 #include <sys/types.h>
+#include <stddef.h>
 #include <sys/prctl.h>
 
 /****************************************************************************
@@ -51,6 +52,18 @@ int ort_supervisor_set(pid_t pid);
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);
 #endif
+
+/* 容器状态槽：只能读写**自己域**那一格。
+ *
+ * 现任周期性发布快照，接替者启动时读回 —— 让替换不再是冷启动，
+ * 而不是"新实例什么都不知道"（见假设审计 H32）。
+ * 设计与访问控制见 arch/arm/src/common/arm_ortcommon.c。
+ *
+ * GET 返回实际字节数；-ENOENT = 没有旧状态可接续。
+ */
+
+int ort_state_put(FAR const void *buf, size_t len);
+int ort_state_get(FAR void *buf, size_t len);
 
 /* 故障事件队列：取下一条未读。>0 = seq；0 = 暂无；-EPERM = 不是监督者 */
 

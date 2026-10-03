@@ -176,6 +176,26 @@
  */
 #define ORT_CAP_FAULT_HANDLER   (1u << 0)
 
+/* [ORT] 容器状态槽：把状态交给接替者（对抗 H32 的"状态不延续"）
+ *
+ *   prctl(PR_ORT_STATE_PUT, buf, len);   n = prctl(PR_ORT_STATE_GET, buf, cap);
+ *       PUT: 返回 OK / 负 errno
+ *       GET: 返回实际读到的字节数；-ENOENT = 没有旧状态可接续
+ *
+ * ★ 只能读写**自己域**那一格，域号由监督者绑定、容器改不了 ——
+ *   所以容器无法窥探别的容器的状态。
+ *
+ * ★ GET 的 -ENOENT 必须与"读到 0 字节"区分开：
+ *   "接续了旧状态"和"没有旧状态"是两件不同的事，
+ *   混起来正是 H31 / H32 那类错误的温床。
+ *
+ * ⚠️ 原型限制：64 字节定长、无版本号、无校验。正式实现需要
+ *   按容器配额定大小、带 seq + 校验（识别撕裂的快照）、
+ *   以及跨版本兼容（新旧实例的结构体可能不同）。
+ */
+#define PR_ORT_STATE_PUT 13
+#define PR_ORT_STATE_GET 14
+
 /* [ORT] 容器故障通知信号
  *
  * 为什么用 SIGUSR1：CONFIG_SIG_SIGUSR1_ACTION 默认为 n，

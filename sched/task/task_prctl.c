@@ -135,6 +135,29 @@ int prctl(int option, ...)
           return ort_fault_read(rec);
         }
 
+      case PR_ORT_STATE_PUT:
+        {
+          /* [ORT] 发布状态快照。域号由内核从调用者的 group 取，
+           * 调用者无法指定 —— 见 <sys/prctl.h> 的说明。
+           *
+           * ⚠️ 同 PR_GET_ORT_FAULT：原型期直接按用户指针读写，
+           *    没做指针合法性校验。正式实现必须校验。
+           */
+
+          FAR const void *buf = (FAR const void *)va_arg(ap, uintptr_t);
+          size_t len          = (size_t)va_arg(ap, int);
+
+          return ort_state_put(buf, len);
+        }
+
+      case PR_ORT_STATE_GET:
+        {
+          FAR void *buf = (FAR void *)va_arg(ap, uintptr_t);
+          size_t len    = (size_t)va_arg(ap, int);
+
+          return ort_state_get(buf, len);
+        }
+
       case PR_GET_ORT_CAPS:
         {
           /* [ORT] 本平台的能力位。直接返回掩码，不碰用户指针。
