@@ -35,3 +35,15 @@ MEMORY
 }
 
 _ram_size = LENGTH(kocram) + LENGTH(uocram);
+
+/* [ORT] 用户态 RAM 的末尾（用户堆一直长到这里）。
+ *
+ * 与 risc-v 侧（rv-virt / mpfs）的 __ld_usram_end 同名同义 ——
+ * USERSPACE->us_heapend 要它。在此之前 us_heapend 一直是 0：
+ * 没有任何代码读它，所以没人发现；直到 ORT 用它划「用户态内存」的窗口。
+ *
+ * ⚠️ 注意 uocram 是**用户** RAM，ORT-M 的域池（0x60840000）就在里面 ——
+ *    那是容器自己的地，算用户态。
+ */
+
+__ld_usram_end = ORIGIN(uocram) + LENGTH(uocram);

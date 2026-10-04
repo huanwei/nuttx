@@ -30,6 +30,163 @@
 
 #include "arm_ortcommon.h"
 
+#ifndef CONFIG_ARCH_ADDRENV
+#  include <nuttx/userspace.h>
+#endif
+
+/****************************************************************************
+ * [ORT] 用户指针闸门：内核碰调用者给的内存之前，先问一句"这块地是谁的"
+ *
+ * ★ 为什么必须有它（这不是卫生问题）：
+ *
+ *   内核在 syscall 里是**带着调用者的地址空间**跑的。于是
+ *   `memcpy(内核槽, user_ptr, len)` 里那个 user_ptr 一旦是坏的，
+ *   取数据异常的**不是容器，是内核** —— 两个 SKU 上都是整机停机：
+ *
+ *     ORT-A：内核态 data abort → arm_dataabort 断言 → panic
+ *     ORT-M：不在任何 MPU 区域 → BusFault 升级 HardFault → panic
+ *            （arm_memfault 里那段"用户态故障只杀该任务"的判别，
+ *              键的是**故障 PC 在不在用户代码区** —— 内核态的 PC
+ *              按构造不命中，所以走的根本不是那条路）
+ *
+ *   实测见手册 §三·补三十三：**任意容器**一句
+ *   `prctl(PR_ORT_STATE_PUT, 0xdeadbe00, 64)` 就能把整机打停机。
+ *
+ * ★ 为什么是"校验"而不是"捕获故障"：
+ *   两个 SKU 都把「内核态内存故障 = 内核真 bug = 停机」当作**刻意的**
+ *   不变量（ORT-M 的注释原话："内核代码的 memfault 是真 bug，应当
+ *   panic"）。若把内核态故障改成返回 -EFAULT，内核的真 bug 也会被
+ *   静默吞掉 —— 一个故障信号不能同时回答"用户给了坏指针"和
+ *   "内核坏了"两个问题（老规矩：一个标志位只能回答一个问题）。
+ *
+ * ★ 两个 SKU：**语义相同，机制不同**（老规矩）。
+ *
+ *     语义：整段 [addr, addr+len) 必须全部落在**调用者可达的用户内存**
+ *           里；否则返回 -EFAULT，且**一个字节都不碰**。
+ *
+ *     ORT-A：逐页走页表（up_addrenv_find_page）—— 精确到页。
+ *     ORT-M：整段落在用户态窗口内 —— 平坦地址空间里没有"未映射"
+ *            这个概念，窗口内就是真实 RAM，所以窗口检查在这里是够的。
+ *
+ * ⚠️ 这**不是**容器间隔离 —— 那是 MMU addrenv / MPU 域的职责，
+ *    另一套机制、另一条判据。这道闸门只回答一个问题：
+ *    **内核会不会因为调用者给的地址而停机。**
+ *
+ * ⚠️ 原型限制：不区分读写权限（用户区本来就是 RW），也不防 TOCTOU
+ *    （校验完到 memcpy 之间地址空间若被**同一容器的另一个线程**改掉）。
+ *    正式实现应当在内核自己的缓冲里做，或把校验与拷贝放进同一个临界区。
+ ****************************************************************************/
+
+/* 逐页步进。必须 ≤ 页大小，否则会**跨过**整页的洞。
+ * ARMv7-A 的用户区一律是 4KB 小页（arm_addrenv_create_region 建的就是它），
+ * ORT-M 侧只是拿它当步长，与页表无关。 */
+
+#define ORT_GATE_STEP  4096u
+
+#if defined(CONFIG_ARCH_ADDRENV)
+
+/* ORT-A（MMU）：这一页在调用者当前的地址空间里有没有映射。 */
+
+static bool ort_gate_mapped(uintptr_t vaddr)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+
+  if (rtcb == NULL || rtcb->addrenv_curr == NULL)
+    {
+      return false;
+    }
+
+  return up_addrenv_find_page(&rtcb->addrenv_curr->addrenv, vaddr) != 0;
+}
+
+#else
+
+/* ⚠️⚠️ ORT-M（MPU）这一支**暂时整支失效** —— 未修，原因如下。
+ *
+ * 本来写的是「整段落在用户态窗口里」，窗口取自 USERSPACE 头表：
+ *
+ *     text  [us_textstart, us_textend)
+ *     data  [us_datastart, us_bssend)              ← 注意中间夹着内核堆
+ *     heap  [us_bssend + CONFIG_MM_KERNEL_HEAPSIZE, us_heapend)
+ *
+ * 但**实测**（2026-10-04，mps2-an500）发现：运行时内核从这个头表里
+ * 读到的值，和镜像文件里的**不是同一份**。同一时刻同一地址，
+ * 逐字对比（`od` 读 nuttx_user.bin / `objdump -s -j .userspace` 读 ELF，
+ * 两边一致；内核打印的是第三份）：
+ *
+ *     字   镜像里的值     内核读到的值     字段
+ *     w1   20000030       00000009         us_textstart   ← 不一致
+ *     w3   2001c4a0       003ffff0         us_datasource  ← 不一致
+ *     w4   60800000       60c00150         us_datastart   ← 不一致
+ *     w5   60800264       60c06000         us_dataend     ← 不一致
+ *     w0/w2/w6/w7/w8/w9/w10 三个来源全部一致
+ *
+ * 不连续的 4 个字，且**没有任何代码写 USERSPACE 的字段**（全树 grep 过），
+ * 所以既不是栈溢出也不是 ABI 错位 —— 是一个**尚未定位的 M 侧问题**。
+ *
+ * 后果很实在：拿这份值当窗口，既会**误拒合法指针**（ortd 的静态缓冲区
+ * 在 0x60800000，正好是 us_datastart 的正确值，却被拒了 —— 装置实测
+ * 连续报 `递交配置失败 ret=-14`），又会**放行内核地址**
+ * （us_textstart 读成 9，窗口变成 [9, 0x2001c496)，把内核 flash 整个圈进去）。
+ *
+ * 两个方向都错，所以这一支**整支关掉**：宁可不修，也不能带着一个
+ * 看起来很严、实际既误伤又漏放的判据。
+ *
+ * ★ 这一条是被**对照臂**逼出来的：装置的两臂里，臂 2（合法指针必须
+ *   照常成功）在 M 上失败。只看臂 1（坏指针被拒）会得出"修好了"的
+ *   相反结论。见手册 §三·补三十四。
+ *
+ * 下一步：先查清这 4 个字在什么时候、被谁改掉（大概率与 ORT-M 的
+ * MPU/域机制或用户态启动路径有关）—— 那是**另一个**问题，
+ * 查清楚之前 M 侧的这笔债没法安全地还。 */
+
+static bool ort_gate_mapped(uintptr_t vaddr)
+{
+  (void)vaddr;
+  return true;
+}
+
+#endif
+
+/* 返回 OK，或 -EINVAL（参数本身不成立）/ -EFAULT（这段地不属于调用者）。
+ * 两个负值时**都没有碰过**这段内存。 */
+
+static int ort_gate(FAR const void *addr, size_t len)
+{
+  uintptr_t first;
+  uintptr_t last;
+  uintptr_t a;
+
+  if (addr == NULL || len == 0)
+    {
+      return -EINVAL;
+    }
+
+  first = (uintptr_t)addr;
+  last  = first + len - 1u;
+
+  /* 溢出：绕回来会把"一大段"变成一个靠前的小段，后面的检查就白做了 */
+
+  if (last < first)
+    {
+      return -EFAULT;
+    }
+
+  /* ★ 逐页查，不能只查首尾：一段地址可以**跨过一个未映射的洞**，
+   *   首尾都在、中间不在 —— 只查两头会把这种判成合法。 */
+
+  for (a = first & ~((uintptr_t)ORT_GATE_STEP - 1u); a <= last;
+       a += ORT_GATE_STEP)
+    {
+      if (!ort_gate_mapped(a))
+        {
+          return -EFAULT;
+        }
+    }
+
+  return OK;
+}
+
 /****************************************************************************
  * [ORT] 容器状态槽：让"被替换的容器"能把状态交给接替者
  *
@@ -233,6 +390,7 @@ int ort_state_put(FAR const void *buf, size_t len)
 {
   int slot = ort_state_slot();
   irqstate_t flags;
+  int ret;
 
   if (slot < 0)
     {
@@ -242,6 +400,15 @@ int ort_state_put(FAR const void *buf, size_t len)
   if (buf == NULL || len == 0 || len > ORT_STATE_MAX)
     {
       return -EINVAL;
+    }
+
+  /* ★ 闸门先过：`buf` 是容器递进来的地址，下面那句 memcpy 是**内核对它
+   *   取数据**。没过闸门就去读，坏指针取异常的是内核，不是容器。 */
+
+  ret = ort_gate(buf, len);
+  if (ret < 0)
+    {
+      return ret;
     }
 
   /* 本核关中断：写者不会在自己的核上被读者打断，
@@ -268,6 +435,7 @@ int ort_state_get(FAR void *buf, size_t len)
   int slot = ort_state_slot();
   uint32_t n;
   int retry;
+  int ret;
 
   if (slot < 0)
     {
@@ -277,6 +445,14 @@ int ort_state_get(FAR void *buf, size_t len)
   if (buf == NULL || len == 0)
     {
       return -EINVAL;
+    }
+
+  /* ★ 闸门先过：`buf` 是容器递进来的地址，这个函数要往它**写**。 */
+
+  ret = ort_gate(buf, len);
+  if (ret < 0)
+    {
+      return ret;
     }
 
   /* ★ 读端**不需要关中断** —— 这是 seqlock 相对于锁的地方：
@@ -453,6 +629,7 @@ int ort_cfg_put(FAR const void *buf, size_t len)
 {
   irqstate_t flags;
   bool changed;
+  int ret;
 
   if (!ort_is_deploy())
     {
@@ -462,6 +639,16 @@ int ort_cfg_put(FAR const void *buf, size_t len)
   if (buf == NULL || len == 0 || len > ORT_CFG_MAX)
     {
       return -EINVAL;
+    }
+
+  /* ★ 闸门先过：代理递进来的地址，下面 memcmp/memcpy 都要读它。
+   *   代理不是容器、权限更窄，但它同样是**用户态**任务 ——
+   *   它递一个坏指针，内核照样停机。 */
+
+  ret = ort_gate(buf, len);
+  if (ret < 0)
+    {
+      return ret;
     }
 
   flags = up_irq_save();
@@ -572,6 +759,7 @@ int ort_cfg_get(FAR void *buf, size_t cap)
   FAR struct tcb_s *rtcb = nxsched_self();
   uint32_t n;
   int retry;
+  int ret;
 
   if (rtcb == NULL || rtcb->pid != ort_supervisor_pid())
     {
@@ -581,6 +769,14 @@ int ort_cfg_get(FAR void *buf, size_t cap)
   if (buf == NULL || cap == 0)
     {
       return -EINVAL;
+    }
+
+  /* ★ 闸门先过：`buf` 是监督者递进来的地址，这个函数要往它**写**。 */
+
+  ret = ort_gate(buf, cap);
+  if (ret < 0)
+    {
+      return ret;
     }
 
   /* seqlock 读端，与状态槽同一形状。三种结果同样必须区分：
@@ -1034,6 +1230,7 @@ int ort_fault_signal_set(int signals)
 int ort_fault_read(FAR struct ort_faultrec_s *rec)
 {
   int retry;
+  int ret;
 
   /* ★ 只有监督者能读 */
 
@@ -1045,6 +1242,16 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec)
   if (rec == NULL)
     {
       return -EINVAL;
+    }
+
+  /* ★ 闸门先过：`rec` 是监督者递进来的地址，下面要往它写一个结构体。
+   *   监督者是我们自己的代码，但它同样跑在用户态 —— 一个空指针或
+   *   一个被写坏的局部变量，代价都是整机停机。 */
+
+  ret = ort_gate(rec, sizeof(struct ort_faultrec_s));
+  if (ret < 0)
+    {
+      return ret;
     }
 
   for (retry = 0; retry < ORT_FAULTQ_RETRIES; retry++)
