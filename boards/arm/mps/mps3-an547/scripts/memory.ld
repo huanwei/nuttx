@@ -35,3 +35,16 @@ MEMORY
 }
 
 _ram_size = LENGTH(kocram) + LENGTH(uocram);
+
+/* [ORT] 用户态 RAM 的末尾（用户堆一直长到这里）。
+ *
+ * 与 an500 / risc-v 侧（rv-virt、mpfs）的 __ld_usram_end 同名同义 ——
+ * USERSPACE->us_heapend 要它。在此之前 an547 的 us_heapend 一直是 0：
+ * 没有代码读它，所以没人发现；直到 ORT 用它划「用户态内存」的窗口
+ * （实测：不设它，闸门会把容器的合法栈指针也拒掉）。
+ *
+ * ★ an500 上先发现的同一个缺口，当时只修了那一块板 —— 这就是
+ *   "只修撞到的那一处"的代价。凡是 PROTECTED 的 mps 板都需要它。
+ */
+
+__ld_usram_end = ORIGIN(uocram) + LENGTH(uocram);

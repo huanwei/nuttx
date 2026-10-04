@@ -82,6 +82,7 @@ extern uint8_t _sdata[];           /* Start of .data */
 extern uint8_t _edata[];           /* End+1 of .data */
 extern uint8_t _sbss[];            /* Start of .bss */
 extern uint8_t _ebss[];            /* End+1 of .bss */
+extern uint8_t __ld_usram_end[];   /* End+1 of user ram（见 memory.ld）*/
 
 /* This is the user space entry point */
 
@@ -99,6 +100,11 @@ const struct userspace_s userspace locate_data(".userspace") =
   .us_dataend       = (uintptr_t)&_edata,
   .us_bssstart      = (uintptr_t)&_sbss,
   .us_bssend        = (uintptr_t)&_ebss,
+
+  /* ★ 用户堆的末尾。原先是空的（0）—— 没人读，所以没人发现。
+   *   ORT 的用户指针闸门要它划「用户态内存」的窗口。 */
+
+  .us_heapend       = (uintptr_t)__ld_usram_end,
 
   /* User data memory structure */
 
