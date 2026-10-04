@@ -101,49 +101,45 @@ static bool ort_gate_mapped(uintptr_t vaddr)
 
 #else
 
-/* ⚠️⚠️ ORT-M（MPU）这一支**暂时整支失效** —— 未修，原因如下。
+/* ORT-M（MPU，平坦地址空间）：这个地址在不在**用户态**内存里。
  *
- * 本来写的是「整段落在用户态窗口里」，窗口取自 USERSPACE 头表：
+ * 窗口取自 USERSPACE（用户态那张头表，链接脚本填的）。三段：
+ *   1. 用户代码段
+ *   2. 用户 .data/.bss（静态区）
+ *   3. 用户堆 —— 任务栈也是从用户堆里分的，所以栈落在这一段
  *
- *     text  [us_textstart, us_textend)
- *     data  [us_datastart, us_bssend)              ← 注意中间夹着内核堆
- *     heap  [us_bssend + CONFIG_MM_KERNEL_HEAPSIZE, us_heapend)
+ * ★ 第 2 段和第 3 段**不连续**：中间夹着内核堆
+ *   （up_allocate_heap() 里 ubase = us_bssend + CONFIG_MM_KERNEL_HEAPSIZE）。
+ *   必须把它排除掉 —— 否则容器递一个内核堆地址进来，内核就替它读了
+ *   内核内存，容器再把自己那格状态读回去，等于**绕开 MPU**。
+ *   那比停机更糟：停机看得见，这个看不见。
  *
- * 但**实测**（2026-10-04，mps2-an500）发现：运行时内核从这个头表里
- * 读到的值，和镜像文件里的**不是同一份**。同一时刻同一地址，
- * 逐字对比（`od` 读 nuttx_user.bin / `objdump -s -j .userspace` 读 ELF，
- * 两边一致；内核打印的是第三份）：
+ * ★★ 这一段曾经整支关掉过：头表在运行期读到的是另一份值
+ *    （us_textstart 读成 9、us_datastart 读成 0x60c00150），窗口
+ *    既误拒合法指针又放行内核地址。根因**不在 ORT**：an500 的
+ *    arm_addregion() 把 0x20000000 那片（**用户镜像自己**）加进了
+ *    用户堆，kumm_addregion() 就地写空闲链表头，把这张表盖掉了。
+ *    已在 mps_allocateheap.c 修掉。全过程见手册 §三·补三十四·11。
  *
- *     字   镜像里的值     内核读到的值     字段
- *     w1   20000030       00000009         us_textstart   ← 不一致
- *     w3   2001c4a0       003ffff0         us_datasource  ← 不一致
- *     w4   60800000       60c00150         us_datastart   ← 不一致
- *     w5   60800264       60c06000         us_dataend     ← 不一致
- *     w0/w2/w6/w7/w8/w9/w10 三个来源全部一致
- *
- * 不连续的 4 个字，且**没有任何代码写 USERSPACE 的字段**（全树 grep 过），
- * 所以既不是栈溢出也不是 ABI 错位 —— 是一个**尚未定位的 M 侧问题**。
- *
- * 后果很实在：拿这份值当窗口，既会**误拒合法指针**（ortd 的静态缓冲区
- * 在 0x60800000，正好是 us_datastart 的正确值，却被拒了 —— 装置实测
- * 连续报 `递交配置失败 ret=-14`），又会**放行内核地址**
- * （us_textstart 读成 9，窗口变成 [9, 0x2001c496)，把内核 flash 整个圈进去）。
- *
- * 两个方向都错，所以这一支**整支关掉**：宁可不修，也不能带着一个
- * 看起来很严、实际既误伤又漏放的判据。
- *
- * ★ 这一条是被**对照臂**逼出来的：装置的两臂里，臂 2（合法指针必须
- *   照常成功）在 M 上失败。只看臂 1（坏指针被拒）会得出"修好了"的
- *   相反结论。见手册 §三·补三十四。
- *
- * 下一步：先查清这 4 个字在什么时候、被谁改掉（大概率与 ORT-M 的
- * MPU/域机制或用户态启动路径有关）—— 那是**另一个**问题，
- * 查清楚之前 M 侧的这笔债没法安全地还。 */
+ * ⚠️ 下界用的是算术表达式，而归一化后的真正堆起点会被对齐**向下**取，
+ *    所以堆最底下几个字节可能被本闸门误拒。方向是保守的（拒绝而不是
+ *    放行），且容器不会把变量放在堆的最底几个字节 —— 原型期接受。 */
 
 static bool ort_gate_mapped(uintptr_t vaddr)
 {
-  (void)vaddr;
-  return true;
+  if (USERSPACE->us_textstart != 0 &&
+      vaddr >= USERSPACE->us_textstart && vaddr < USERSPACE->us_textend)
+    {
+      return true;
+    }
+
+  if (vaddr >= USERSPACE->us_datastart && vaddr < USERSPACE->us_bssend)
+    {
+      return true;
+    }
+
+  return vaddr >= USERSPACE->us_bssend + CONFIG_MM_KERNEL_HEAPSIZE &&
+         vaddr <  USERSPACE->us_heapend;
 }
 
 #endif
