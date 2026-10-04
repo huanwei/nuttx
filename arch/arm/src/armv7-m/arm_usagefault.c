@@ -29,12 +29,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
 #include <nuttx/debug.h>
+#include <nuttx/sched.h>
+#include <nuttx/userspace.h>
 
 #include <arch/irq.h>
 
 #include "nvic.h"
 #include "arm_internal.h"
+#include "arm_ortcommon.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -111,6 +115,60 @@ int arm_usagefault(int irq, void *context, void *arg)
     {
       ufalert("\tDivide by zero\n");
     }
+
+#ifdef CONFIG_ORT_MEMDOMAIN
+  /* [ORT] 与 arm_memfault.c **完全同一条判据**：故障 PC 落在用户代码区
+   * （USERSPACE->us_textstart..us_textend）→ 用户态（容器）故障，
+   * 只终止该任务，不 panic 内核。
+   *
+   * ★ 这一条原先**完全没有** —— 见手册 §三·补三十七：
+   *   容器执行一条未定义指令（`udf`）就能把整机打停机，
+   *   而这不需要恶意 —— 一个被写坏的函数指针指到自己的数据上就够了。
+   *
+   * ★ 三条故障向量（memfault / busfault / usagefault）必须语义相同，
+   *   否则"容器能不能带走整机"取决于它撞上的是哪一条 ——
+   *   这正是这笔债的成因。
+   */
+
+  if (USERSPACE->us_textstart != 0)
+    {
+      FAR uint32_t *regs = (FAR uint32_t *)context;
+      uintptr_t pc = (uintptr_t)regs[REG_PC];
+
+      if (pc >= USERSPACE->us_textstart && pc < USERSPACE->us_textend)
+        {
+          FAR struct tcb_s *ftcb = nxsched_self();
+          enum ort_fault_action_e act;
+
+          _alert("ORT: USER TASK USAGEFAULT pid=%d pc=%08" PRIxPTR
+                 " -> terminate task\n",
+                 ftcb != NULL ? ftcb->pid : -1, pc);
+
+          /* 先清 fault 状态，避免异常返回时重新触发同一个 fault。
+           * 未定义指令没有对应的 FAR 寄存器，PC 就是全部信息。 */
+
+          putreg32(NVIC_CFAULTS_USGFAULTSR_MASK, NVIC_CFAULTS);
+
+          /* 处置与 memfault 共用一份（见 arm_ortcommon.c）。 */
+
+          act = ort_contain_user_fault(ftcb, pc, pc);
+
+          if (act == ORT_FAULT_CONTAINED)
+            {
+              /* 正常异常返回 → PendSV → 信号投递 → 容器被终止 */
+
+              return OK;
+            }
+
+          _alert("ORT: user usagefault %s -> fail-stop\n",
+                 act == ORT_FAULT_NO_CONTAINER ? "with no container"
+                                               : "undeliverable");
+
+          up_irq_save();
+          PANIC_WITH_REGS("user usagefault", context);
+        }
+    }
+#endif
 
   up_irq_save();
   PANIC_WITH_REGS("panic", context);

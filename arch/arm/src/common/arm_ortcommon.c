@@ -16,6 +16,7 @@
 #ifdef CONFIG_ORT_CONTAINER
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <errno.h>
 #include <debug.h>
@@ -1222,6 +1223,84 @@ int ort_fault_signal_set(int signals)
   return g_faultq_nosig ? 0 : 1;
 }
 #endif /* CONFIG_ORT_SUPERVISOR_RESET */
+
+/****************************************************************************
+ * Name: ort_contain_user_fault
+ *
+ * Description:
+ *   M 侧容器故障的统一处置（memfault / usagefault 共用）。
+ *   调用者判定"这是用户态故障"之后调进来。
+ *
+ *   顺序：先通知监督者（独立通道，见 ort_fault_notify）→ 投递 SIGSEGV
+ *   给容器一个可观测点 → 保证容器一定会死（升级 SIGKILL）。
+ *
+ * Returned Value:
+ *   ORT_FAULT_CONTAINED  已交给信号路径，调用者正常异常返回即可
+ *   ORT_FAULT_NO_CONTAINER / ORT_FAULT_UNDELIVERABLE  调用者必须 fail-stop
+ *
+ ****************************************************************************/
+
+enum ort_fault_action_e
+ort_contain_user_fault(FAR struct tcb_s *ftcb, uintptr_t pc, uintptr_t addr)
+{
+  FAR struct task_group_s *fgroup;
+  uint32_t faults;
+  int ret = -ESRCH;
+
+  if (ftcb == NULL || (fgroup = ftcb->group) == NULL)
+    {
+      return ORT_FAULT_NO_CONTAINER;
+    }
+
+  /* 故障计数是**容器级**的（同容器的线程共享），
+   * 在这里先自增，后续判据都用自增后的值。 */
+
+  faults = ++fgroup->tg_ort_faults;
+
+  /* 先通知监督者：必须用**独立通道**，不能靠容器自己注册的 SIGSEGV
+   * 处理器 —— 那个处理器是容器可控的（SIG_IGN 在 NuttX 里等于把动作
+   * 删掉），容器一删，监督者就瞎了。先通知再终止。 */
+
+  ort_fault_notify(ftcb->pid, pc, addr, faults);
+
+  /* 只在首次故障时投 SIGSEGV：若处理完又回到故障指令，再发一遍没有意义。 */
+
+  if (faults == 1)
+    {
+      ret = nxsig_kill(ftcb->pid, SIGSEGV);
+    }
+
+  /* 保证容器一定会死 —— 监督者的终止权。
+   *
+   * SIGSEGV 不足以保证终止：POSIX 允许忽略它（NuttX 亦然，sig_action.c
+   * 只对 SIG_FLAG_NOCATCH 的信号返回 -EINVAL，SIGSEGV 没设这个标志）。
+   * 容器有两种逃法：(a) SIG_IGN → 动作被删掉，什么都没投出去；
+   * (b) 注册一个"打印一下就返回"的处理器 → 异常返回后再踩同一条指令，
+   * 无限循环卡死 CPU。
+   *
+   * SIGKILL 可以依赖：CONFIG_SIG_DEFAULT 给它设了 SIG_FLAG_NOCATCH，
+   * 容器改不掉它的动作。 */
+
+  if (faults > 1 || ftcb->sigdeliver == NULL)
+    {
+      _alert("ORT: escalating pid=%d to SIGKILL (faults=%" PRIu32 ")\n",
+             ftcb->pid, faults);
+      ret = nxsig_kill(ftcb->pid, SIGKILL);
+    }
+
+  /* 连 SIGKILL 都投不出去（CONFIG_SIG_DEFAULT 没开）说明任何信号都不会
+   * 被处理，异常返回后必然无限 fault。此时唯一诚实的做法是 fail-stop。 */
+
+  if (ret < 0 || ftcb->sigdeliver == NULL)
+    {
+      _alert("ORT: cannot terminate pid=%d (ret=%d) -> fail-stop\n"
+             "     (CONFIG_SIG_DEFAULT=y 是 ORT 的必需配置)\n",
+             ftcb->pid, ret);
+      return ORT_FAULT_UNDELIVERABLE;
+    }
+
+  return ORT_FAULT_CONTAINED;
+}
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec)
 {

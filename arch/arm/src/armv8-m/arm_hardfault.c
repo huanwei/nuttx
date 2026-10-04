@@ -98,7 +98,8 @@ int arm_hardfault(int irq, void *context, void *arg)
         }
 #endif /* CONFIG_DEBUG_BUSFAULT */
 
-#ifdef CONFIG_DEBUG_USAGEFAULT
+/* ★ [ORT] 见 armv7-m/arm_hardfault.c：安全行为不该由 DEBUG_* 配置项决定 */
+#if defined(CONFIG_DEBUG_USAGEFAULT) || defined(CONFIG_ORT_MEMDOMAIN)
       if (cfsr & NVIC_CFAULTS_USGFAULTSR_MASK)
         {
           return arm_usagefault(irq, context, arg);

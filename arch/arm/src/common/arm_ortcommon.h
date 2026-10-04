@@ -46,6 +46,29 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
 void ort_state_invalidate(int domain);
 
+/* [ORT] 容器故障的统一处置结果（M 侧 memfault / usagefault 共用）
+ *
+ * ★ 为什么要有这个枚举：处置逻辑（通知监督者 → SIGSEGV → 升级 SIGKILL）
+ *   原先只长在 arm_memfault.c 里。undefined instruction 那条路需要
+ *   一模一样的处置 —— 抄一份必然漂移，而"两处判据不一致"正是这条债
+ *   本来的成因（三条故障向量里只有一条被漏掉）。
+ *
+ * 调用者**必须先自己判定**"这是用户态故障"（判据两边一致：
+ * 故障 PC 落在 USERSPACE->us_textstart..us_textend），再调这里。
+ * panic 由调用者做 —— PANIC_WITH_REGS 是各架构自己的宏，
+ * common/ 里拿不到。
+ */
+
+enum ort_fault_action_e
+{
+  ORT_FAULT_CONTAINED = 0,   /* 已交给信号路径终止该任务 → 正常异常返回 */
+  ORT_FAULT_NO_CONTAINER,    /* 找不到容器 → fail-stop */
+  ORT_FAULT_UNDELIVERABLE    /* 连 SIGKILL 都投不出去 → fail-stop */
+};
+
+enum ort_fault_action_e ort_contain_user_fault(FAR struct tcb_s *ftcb,
+                                               uintptr_t pc, uintptr_t addr);
+
 /* 监督者槽位 */
 
 int ort_supervisor_set(pid_t pid);

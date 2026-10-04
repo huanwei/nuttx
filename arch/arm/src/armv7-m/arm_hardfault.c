@@ -95,12 +95,22 @@ int arm_hardfault(int irq, void *context, void *arg)
         }
 #endif /* CONFIG_DEBUG_BUSFAULT */
 
-#ifdef CONFIG_DEBUG_USAGEFAULT
+      /* ★ [ORT] UsageFault 没有使能，所以它会**升级成 HardFault** 到这里。
+       *   原先这条转发被 CONFIG_DEBUG_USAGEFAULT 挡着 —— 那意味着
+       *   **"容器会不会带走整机"取决于一个 DEBUG_* 配置项**，
+       *   这是设计问题，不是配置问题。
+       *
+       *   所以 ORT 构建下一律转发：让 usage fault 走到 arm_usagefault()，
+       *   那里有与 memfault 同一套的用户态判别（见手册 §三·补三十七）。
+       *   非 ORT 构建维持原样，不受影响。
+       */
+
+#if defined(CONFIG_DEBUG_USAGEFAULT) || defined(CONFIG_ORT_MEMDOMAIN)
       if (cfsr & NVIC_CFAULTS_USGFAULTSR_MASK)
         {
           return arm_usagefault(irq, context, arg);
         }
-#endif /* CONFIG_DEBUG_USAGEFAULT */
+#endif
     }
 
   /* Dump some hard fault info */
