@@ -277,9 +277,30 @@ void arm_addregion(void)
   mpu_user_intsram(REGION1_RAM_START, REGION1_RAM_SIZE);
 #endif
 
-  /* Add region 1 to the user heap */
+#if defined(CONFIG_BUILD_PROTECTED)
 
+  /* ★ PROTECTED 构建下 region 1 **不能**当堆用：它就是用户镜像本身。
+   *
+   *   an500 的 REGION1_RAM = MPS_SRAM2 = 0x20000000（4MB），
+   *   而 PROTECTED 构建里 CONFIG_NUTTX_USERSPACE = 0x20000000、
+   *   memory.ld 的 uflash 也在 0x20000000 —— 用户代码/数据镜像就装在这里。
+   *
+   *   kumm_addregion() 会在**区域起始处**立刻写空闲链表头。于是
+   *   0x20000000 那张 struct userspace_s 头表被就地盖掉：
+   *   实测 us_textstart/datasource/datastart/dataend 四个字变成
+   *   堆节点的 size/flink 之类（见手册 §三·补三十四·11），
+   *   而 nx_start 里读这些字段的代码**都在 up_initialize 之前**，
+   *   所以系统照常起得来 —— 直到有代码在运行期真的去读它。
+   *
+   *   更坏的后果还在后头：这个区域一旦进了用户堆，用户 malloc
+   *   可能从 .text 里切一块出来返回。
+   *
+   *   （flat 构建没有 uflash，SRAM2 是空闲内存，那时候加进来是对的 ——
+   *     所以按构建类型分，而不是按板子分。） */
+
+#else
   kumm_addregion((void *)REGION1_RAM_START, REGION1_RAM_SIZE);
+#endif
 
 #if CONFIG_MM_REGIONS > 2
 
