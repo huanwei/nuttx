@@ -180,23 +180,10 @@ static int ort_sig_kill(FAR struct tcb_s *ftcb, int signo)
   return ret;
 }
 
-/* 该信号投递出去是否**必然**由内核里的默认动作接手？
-
- * 注意：为 true 才说明「不会有用户代码被执行」——
- * 只有这种情况才允许在内核栈上就地投递（见 ort_sig_kill）。
- */
-
-#  define ort_sig_isdefault(ftcb, signo) nxsig_isdefault((ftcb), (signo))
-
 #else
 
 #  define ort_sig_kill(ftcb, signo) nxsig_kill((ftcb)->pid, (signo))
 
-/* 没开 CONFIG_SIG_DEFAULT 时任何信号都没有默认动作，
- * 一律按「可能落到用户处理器」处理 —— 保守但安全。
- */
-
-#  define ort_sig_isdefault(ftcb, signo) false
 
 #endif /* CONFIG_SIG_DEFAULT */
 
@@ -249,7 +236,24 @@ uint32_t ort_caps(void)
    *      改一边必须改另一边 —— 否则这个位就会开始说谎。
    */
 
-  return 0;
+  /* ★ 2026-10-04 起返回 ORT_CAP_FAULT_HANDLER：**与 ORT-M 一致**。
+   *
+   *   这里原先返回 0 —— 不是"还没做"，是**做不到**（§三·补十二 实测）：
+   *   有用户处理器时控制权会回到建立在**用户栈**上的 arm_sigdeliver，
+   *   而 abort 向量也把帧建在用户栈上 ⇒ 三者挤一张栈 ⇒ 整机复位。
+   *
+   *   那条路已在 §三·补四十 修好，障碍不存在了。
+   *   而现在**必须打开**：对标 Wind River —— 它的 RTP 能收到自己的异常
+   *   （异常产生同步信号、在当前上下文立即执行）。默认不给不是优势，
+   *   是差距；真正的能力是"**能给，且给了也带不走别人**"。
+   *
+   *   ★ 能力的边界（与 ort_handle_user_fault 里那段是同一件事的两面，
+   *     改一边必须改另一边）：处理器是**通知，不是恢复** ——
+   *     返回后再踩同一条故障指令 → 升级 SIGKILL。容器仍然要死。
+   *     监督者的终止权不变，它另有 ORT_SIGFAULT 独立通道。
+   */
+
+  return ORT_CAP_FAULT_HANDLER;
 }
 
 /****************************************************************************
@@ -399,7 +403,19 @@ bool ort_handle_user_fault(uintptr_t pc, uintptr_t addr)
    *   其默认动作就是终止 —— 那一步是安全的（见 ort_sig_kill）。
    */
 
-  if (faults == 1 && ort_sig_isdefault(ftcb, SIGSEGV))
+  /* ★ 2026-10-04 起**无条件投递**（与 ORT-M 一致）。
+   *   原先只对'没装处理器'的进程投 —— 当时的理由是真的：
+   *   那条路走不通（§三·补二十七 实测整机复位）。它已在
+   *   §三·补四十 修好，所以跳过不再必要，而且**与对标不符**
+   *   （Wind River 的 RTP 能收到自己的异常）。
+   *
+   *   ★ 给了也不危险，靠三条不变量（缺一不可）：
+   *     1. 处理器**不能阻止终止** —— 返回后再踩同一条故障指令，
+   *        下一步立即升级 SIGKILL（实测）；
+   *     2. 处理器跑在**用户态、自己的域内**；
+   *     3. 监督者走 **ORT_SIGFAULT 独立通道**，不依赖容器的处理器。
+   */
+  if (faults == 1)
     {
       ret = ort_sig_kill(ftcb, SIGSEGV);
     }
