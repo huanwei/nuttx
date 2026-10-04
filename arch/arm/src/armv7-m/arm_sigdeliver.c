@@ -177,6 +177,34 @@ retry:
    * address where the end of the frame equals the desired SP.
    */
 
+  /* ★★ [ORT] 恢复必须用**投递时那一个帧** —— 也就是函数开头捕获的 `regs`。
+   *
+   *   原来的结尾是 `rtcb->xcp.regs = rtcb->xcp.saved_regs;`，即**重新读**
+   *   一次这个字段。但 `saved_regs` 会在投递过程中被改写：
+   *   `up_schedule_sigaction()` 每次排信号都会写它（`saved_regs = xcp.regs`），
+   *   而 `retry` 路径下它**在同一趟 arm_sigdeliver 里**就会被重入。
+   *   于是：
+   *
+   *     - 上面那段 `desired_sp/implied_sp` 用的是**开头**的 `regs`；
+   *     - 真正恢复用的却是**结尾**的 `saved_regs`；
+   *     - 两者可以是**两个不同的帧**，那段 SP 判断因此失去意义，
+   *       恢复也可能落到一个内容已被后续栈活动覆盖的帧上。
+   *
+   *   ARMv7-M 的异常返回是**硬件按 PSP 弹栈**的：帧地址与帧里记的 SP
+   *   必须自洽。拿到一个不自洽的帧，弹出来的 PC 就是栈上的任意值。
+   *
+   *   实测（mps2-an500，标准场景，改动前 2/4~4/4 复现）：
+   *     局部 regs=0x60c08dc0（内容自洽，PC 在用户代码、SP==implied）
+   *     xcp.regs = saved_regs = 0x60c08c60（另一个帧）
+   *     崩溃 PC = 0x60c08d38 = 0x60c08c60 + XCPTCONTEXT_SIZE
+   *     CFSR.INVSTATE —— 跳到了偶数地址。
+   *
+   *   openvela 的 fork 记录过同一现象（"a new up_schedule_sigaction could
+   *   overlay saved_regs with in-process regs"），他们的修法是限制投递时机；
+   *   这里改成**只用一个帧**，更小且不需要额外的状态位。
+   *
+   *   不变量：恢复用的帧、SP 判断用的帧、以及两个 TCB 字段，**同一个**。 */
+
   desired_sp = regs[REG_R13];
   implied_sp = (uint32_t)regs + XCPTCONTEXT_SIZE;
 
@@ -185,10 +213,9 @@ retry:
       new_regs = (uint32_t *)(desired_sp - XCPTCONTEXT_SIZE);
       memmove(new_regs, regs, XCPTCONTEXT_SIZE);
       regs = new_regs;
-      rtcb->xcp.saved_regs = new_regs;
     }
 
-  rtcb->xcp.regs = rtcb->xcp.saved_regs;
+  rtcb->xcp.saved_regs = regs;
+  rtcb->xcp.regs       = regs;
   arm_fullcontextrestore();
-  UNUSED(regs);
 }

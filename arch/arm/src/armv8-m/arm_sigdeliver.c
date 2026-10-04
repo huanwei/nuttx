@@ -177,6 +177,19 @@ retry:
    * address where the end of the frame equals the desired SP.
    */
 
+  /* ★★ [ORT] 与 armv7-m 同一处上游缺陷，同一修法。
+   *
+   *   原来的结尾是 `rtcb->xcp.regs = rtcb->xcp.saved_regs;`（**重新读**字段），
+   *   而 `saved_regs` 会在投递过程中被 `up_schedule_sigaction()` 改写
+   *   （`retry` 路径下同一趟就会重入）。于是上面那段 `desired_sp/implied_sp`
+   *   用的是**开头**的 `regs`，真正恢复用的却是**结尾**的 `saved_regs` ——
+   *   两个帧可以不同，SP 判断失去意义，恢复可能落到一个内容已被覆盖的帧上。
+   *   异常返回由硬件按 PSP 弹栈，帧地址与帧内 SP 必须自洽。
+   *
+   *   实测细节见 arch/arm/src/armv7-m/arm_sigdeliver.c 的同名注释。
+   *
+   *   不变量：恢复用的帧、SP 判断用的帧、以及两个 TCB 字段，**同一个**。 */
+
   desired_sp = regs[REG_R13];
   implied_sp = (uint32_t)regs + XCPTCONTEXT_SIZE;
 
@@ -185,10 +198,9 @@ retry:
       new_regs = (uint32_t *)(desired_sp - XCPTCONTEXT_SIZE);
       memmove(new_regs, regs, XCPTCONTEXT_SIZE);
       regs = new_regs;
-      rtcb->xcp.saved_regs = new_regs;
     }
 
-  rtcb->xcp.regs = rtcb->xcp.saved_regs;
+  rtcb->xcp.saved_regs = regs;
+  rtcb->xcp.regs       = regs;
   arm_fullcontextrestore();
-  UNUSED(regs);
 }
