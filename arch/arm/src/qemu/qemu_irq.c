@@ -123,6 +123,24 @@ void up_irqinitialize(void)
   if (sched_getcpu() == 0)
     {
       arm_gic0_initialize();  /* Initialization unique to CPU0 */
+
+      /* ★★ [ORT] 中断栈染色只做一次、只由 CPU0 做（上游缺陷的本地修复）。
+       *
+       *   `arm_color_intstack()` 会把**所有** CPU 的中断栈写成染色值
+       *   （0xdeadbeef）。它原本位于每个 CPU 的 `up_irqinitialize()` 末尾，
+       *   于是**每个二级核在 `arm_cpu_boot()` 里都会把四个中断栈重刷一遍**
+       *   ——包括 **CPU0 正在使用的那一个**：CPU0 的 tick/控制台打印就跑在
+       *   自己的中断栈上，栈上被重刷掉的保存值会让某个 `pop {..,pc}`
+       *   取到 0xdeadbeef → 跳到 0xdeadbeee（prefetch abort，开机即死）。
+       *   实测（qemu-armv7a knsh_smp，-smp 4）：改前 40 次扫描约 4-39 次
+       *   失败，把两个染色器全部临时关掉 0/40；`arm_color_intstack` 的
+       *   调用者 lr 在多核日志里被直接抓到。
+       *
+       *   放在这里：SMP 尚未启动、中断尚未使能、四个栈都无人使用 ——
+       *   一次刷全，诊断语义（FILLED%）不变。
+       */
+
+      arm_color_intstack();
     }
 
   arm_gic_initialize();   /* Initialization common to all CPUs */
@@ -130,7 +148,6 @@ void up_irqinitialize(void)
 #ifndef CONFIG_SUPPRESS_INTERRUPTS
   /* And finally, enable interrupts */
 
-  arm_color_intstack();
   up_irq_enable();
 #endif
 }
