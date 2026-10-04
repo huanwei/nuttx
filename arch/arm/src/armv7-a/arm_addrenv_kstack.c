@@ -145,6 +145,15 @@ int up_addrenv_kstackalloc(struct tcb_s *tcb)
       return -ENOMEM;
     }
 
+  tcb->xcp.sigstack = kmm_memalign(8, ARCH_KERNEL_STACKSIZE);
+  if (!tcb->xcp.sigstack)
+    {
+      kmm_free(tcb->xcp.kstack);
+      tcb->xcp.kstack = NULL;
+      if (tcb->xcp.sigstack) { kmm_free(tcb->xcp.sigstack); tcb->xcp.sigstack = NULL; }
+      return -ENOMEM;
+    }
+
   return OK;
 }
 

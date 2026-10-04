@@ -432,13 +432,14 @@ uint32_t *arm_syscall(uint32_t *regs)
 
               /* Create a frame for info and copy the kernel info */
 
-              usp = usp - sizeof(siginfo_t);
+              usp = usp - (2 * XCPTCONTEXT_SIZE + sizeof(siginfo_t));
               memcpy((void *)usp, (void *)regs[REG_R2], sizeof(siginfo_t));
 
               /* Now set the updated SP and user copy of "info" to R2 */
 
               rtcb->xcp.kstkptr = (uint32_t *)regs[REG_SP];
               regs[REG_SP]      = usp;
+
               regs[REG_R2]      = usp;
             }
 #endif

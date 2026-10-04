@@ -327,6 +327,8 @@ struct xcptcontext
 
   uint32_t *ustkptr;  /* Saved user stack pointer */
   uint32_t *kstack;   /* Allocate base of the (aligned) kernel stack */
+
+  uint32_t *sigstack; /* [ORT] signal delivery stack */
   uint32_t *kstkptr;  /* Saved kernel stack pointer */
 #endif
 #endif

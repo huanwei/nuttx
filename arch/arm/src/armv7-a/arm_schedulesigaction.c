@@ -103,8 +103,12 @@ void up_schedule_sigaction(struct tcb_s *tcb)
                                         XCPTCONTEXT_SIZE);
   memcpy(tcb->xcp.regs, tcb->xcp.saved_regs, XCPTCONTEXT_SIZE);
 
-  tcb->xcp.regs[REG_SP]    = (uint32_t)tcb->xcp.regs +
-                                       XCPTCONTEXT_SIZE;
+#ifdef CONFIG_ARCH_KERNEL_STACK
+  if (tcb->xcp.sigstack != NULL)
+    { tcb->xcp.regs[REG_SP]  = (uint32_t)tcb->xcp.sigstack + ARCH_KERNEL_STACKSIZE; }
+  else
+#endif
+    { tcb->xcp.regs[REG_SP]  = (uint32_t)tcb->xcp.regs + XCPTCONTEXT_SIZE; }
 
   /* Then set up to vector to the trampoline with interrupts
    * disabled
