@@ -447,6 +447,27 @@ arm_vectordata:
 	mrc		CP15_DFAR(r1)			/* Get R1=DFAR */
 	mrc		CP15_DFSR(r2)			/* Get r2=DFSR */
 	mov		r4, sp				/* Save the SP in a preserved register */
+	/* ★ [ORT] 预留一个 XCPTCONTEXT_SIZE。
+	 *
+	 *   abort 向量把寄存器帧建在 **SYS 栈** 上（`cpsid if,#PSR_MODE_SYS`
+	 *   之后 `stmdb sp!` —— 而 ARMv7-A 上 SYS 与 USR **共用 SP**），
+	 *   然后**就在这张栈上**调用 C 处理器：调用帧紧贴寄存器帧的下方。
+	 *
+	 *   而信号投递（up_schedule_sigaction）会把整个上下文**下移**一个
+	 *   XCPTCONTEXT_SIZE 到 [帧-XS, 帧) —— 正好压掉这里刚建好的调用帧。
+	 *   处理器返回时返回地址已被踩 → 跳到垃圾地址
+	 *   （实测 PC=0x6 → arm_undefinedinsn → panic → 整机复位）。
+	 *
+	 *   预留一段之后，C 帧落在拷贝区**下面**，两者不再相交。
+	 *
+	 *   系统调用 / IRQ 两条向量没有这个问题 —— 它们的 C 处理器跑在
+	 *   **中断栈**上（见上面的 setirqstack），帧与调用帧本来就不在一张栈上。
+	 *
+	 *   ⚠️ 这里**不能**照抄 setirqstack：abort 可以嵌套在 IRQ 里（驱动 bug
+	 *   就够），切到中断栈会覆盖 IRQ 自己的帧；而 SVC 不会嵌套在 IRQ 里，
+	 *   所以它切栈是安全的。差别是实的，不是风格。
+	 */
+	sub		sp, sp, #XCPTCONTEXT_SIZE
 	bic		sp, sp, #7			/* Force 8-byte alignment */
 	mov		fp,	r0
 	.cfi_def_cfa	fp,	0			/* Register in fp, so we just set fp as frame */
@@ -540,6 +561,27 @@ arm_vectorprefetch:
 	mrc		CP15_IFAR(r1)			/* Get R1=IFAR */
 	mrc		CP15_IFSR(r2)			/* Get r2=IFSR */
 	mov		r4, sp				/* Save the SP in a preserved register */
+	/* ★ [ORT] 预留一个 XCPTCONTEXT_SIZE。
+	 *
+	 *   abort 向量把寄存器帧建在 **SYS 栈** 上（`cpsid if,#PSR_MODE_SYS`
+	 *   之后 `stmdb sp!` —— 而 ARMv7-A 上 SYS 与 USR **共用 SP**），
+	 *   然后**就在这张栈上**调用 C 处理器：调用帧紧贴寄存器帧的下方。
+	 *
+	 *   而信号投递（up_schedule_sigaction）会把整个上下文**下移**一个
+	 *   XCPTCONTEXT_SIZE 到 [帧-XS, 帧) —— 正好压掉这里刚建好的调用帧。
+	 *   处理器返回时返回地址已被踩 → 跳到垃圾地址
+	 *   （实测 PC=0x6 → arm_undefinedinsn → panic → 整机复位）。
+	 *
+	 *   预留一段之后，C 帧落在拷贝区**下面**，两者不再相交。
+	 *
+	 *   系统调用 / IRQ 两条向量没有这个问题 —— 它们的 C 处理器跑在
+	 *   **中断栈**上（见上面的 setirqstack），帧与调用帧本来就不在一张栈上。
+	 *
+	 *   ⚠️ 这里**不能**照抄 setirqstack：abort 可以嵌套在 IRQ 里（驱动 bug
+	 *   就够），切到中断栈会覆盖 IRQ 自己的帧；而 SVC 不会嵌套在 IRQ 里，
+	 *   所以它切栈是安全的。差别是实的，不是风格。
+	 */
+	sub		sp, sp, #XCPTCONTEXT_SIZE
 	bic		sp, sp, #7			/* Force 8-byte alignment */
 	mov		fp,	r0
 	.cfi_def_cfa	fp,	0			/* Register in fp, so we just set fp as frame */
@@ -627,6 +669,27 @@ arm_vectorundefinsn:
 	mov		fp, #0				/* Init frame pointer */
 	mov		r0, sp				/* Get r0=xcp */
 	mov		r4, sp				/* Save the SP in a preserved register */
+	/* ★ [ORT] 预留一个 XCPTCONTEXT_SIZE。
+	 *
+	 *   abort 向量把寄存器帧建在 **SYS 栈** 上（`cpsid if,#PSR_MODE_SYS`
+	 *   之后 `stmdb sp!` —— 而 ARMv7-A 上 SYS 与 USR **共用 SP**），
+	 *   然后**就在这张栈上**调用 C 处理器：调用帧紧贴寄存器帧的下方。
+	 *
+	 *   而信号投递（up_schedule_sigaction）会把整个上下文**下移**一个
+	 *   XCPTCONTEXT_SIZE 到 [帧-XS, 帧) —— 正好压掉这里刚建好的调用帧。
+	 *   处理器返回时返回地址已被踩 → 跳到垃圾地址
+	 *   （实测 PC=0x6 → arm_undefinedinsn → panic → 整机复位）。
+	 *
+	 *   预留一段之后，C 帧落在拷贝区**下面**，两者不再相交。
+	 *
+	 *   系统调用 / IRQ 两条向量没有这个问题 —— 它们的 C 处理器跑在
+	 *   **中断栈**上（见上面的 setirqstack），帧与调用帧本来就不在一张栈上。
+	 *
+	 *   ⚠️ 这里**不能**照抄 setirqstack：abort 可以嵌套在 IRQ 里（驱动 bug
+	 *   就够），切到中断栈会覆盖 IRQ 自己的帧；而 SVC 不会嵌套在 IRQ 里，
+	 *   所以它切栈是安全的。差别是实的，不是风格。
+	 */
+	sub		sp, sp, #XCPTCONTEXT_SIZE
 	bic		sp, sp, #7			/* Force 8-byte alignment */
 	mov		fp,	r0
 	.cfi_def_cfa	fp,	0			/* Register in fp, so we just set fp as frame */
