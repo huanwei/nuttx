@@ -203,13 +203,17 @@ void group_leave(FAR struct tcb_s *tcb)
            *   只是噪声，所以这里排除。
            *
            *   ⚠️ 此刻 group 还完整（在 group_release 之前），
-           *      tg_ort_domain / tg_ort_faults / tg_exitcode 都可读。 */
+           *      ORT 字段都可读。
+           *
+           *   ★ 退出码读 tg_ort_exitcode 而不是 tg_exitcode：后者只在
+           *     CONFIG_SCHED_HAVE_PARENT 下存在（A 有 M 无），而本钩子
+           *     两个 SKU 都要编译、都要报码。见 §三·补五十四。 */
 
           if (group->tg_ort_domain != 0 && group->tg_ort_faults == 0)
             {
               ort_group_exit_notify((pid_t)group->tg_pid,
                                     (uint8_t)group->tg_ort_domain,
-                                    group->tg_exitcode);
+                                    group->tg_ort_exitcode);
             }
 #endif
 

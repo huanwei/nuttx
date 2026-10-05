@@ -73,6 +73,34 @@ enum ort_fault_action_e ort_contain_user_fault(FAR struct tcb_s *ftcb,
 
 int ort_supervisor_set(pid_t pid);
 
+/* ── [ORT] 域预算（手册 §三·补五十四）────────────────────────────────
+ *
+ * 缺口：域池大小/块数是编译期常量，部署方（manifest）只能猜；
+ * 且"预算"（本部署允许用几个域）与"容量"（本构建物理上有几个）
+ * 此前是同一个数 —— 配额无法按部署收窄。
+ *
+ * 三个词分开：
+ *   容量 capacity —— 本架构**功能上**能给的域数。
+ *        M：池块数（ORT_DOMAIN_COUNT，当前 4）；
+ *        A：状态槽数（ORT_STATE_SLOTS）——域在 A 上唯一的作用就是
+ *           状态槽索引，"能绑但发布不了状态"的域不算容量。
+ *   配额 quota   —— 监督者可收窄的**执行**上界（只紧不松），
+ *        0 = 未设。零初始化即"未设" ⇒ 默认回到容量，
+ *        这是保守方向（没有策略时按物理上限执行）✓ H28 约定。
+ *   预算 budget  —— 真正执行的那个数 = min(容量, 配额)（未设 = 容量）。
+ *        绑域与部署校验都用它；一个数回答一个问题。
+ *
+ * 绑定契约（两个 SKU 语义相同，见 §三·补五十四 的语义统一）：
+ *   域号 ∈ [0, budget) 之外 → -EINVAL，且**不改动**既有绑定。
+ */
+
+#define ORT_STATE_SLOTS  8
+
+/* 容量：各架构实现（MPU 侧=池块数；MMU 侧=状态槽数）。
+ * budget/quota_set 要给 sched/ 调，声明在公共头 arch/arm_ort.h。 */
+
+int ort_domain_capacity(void);
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);
 #endif

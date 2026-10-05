@@ -74,6 +74,17 @@ int ort_wait_admission(unsigned timeout_ms);
 int ort_ready_set(void);
 int ort_ready_get(pid_t pid);
 
+/* 域预算（手册 §三·补五十四）。
+ *   ort_domain_budget()    —— 执行预算 = min(容量, 配额)，未设配额时 = 容量。
+ *                             标量只读；部署方用它校验 manifest 的 domain。
+ *   ort_domain_quota_set(n)—— **只有监督者**；n ∈ [1, 容量]，越界 -EINVAL。
+ *                             只紧不松（容量就是物理上限）。
+ *   绑域契约随之统一：domain ∉ [0, budget) → -EINVAL，且不动既有绑定
+ *   （两个 SKU 相同 —— 此前 M 侧"越界→静默解除绑定+OK"的语义已取消）。 */
+
+int ort_domain_budget(void);
+int ort_domain_quota_set(int n);
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);
 #endif

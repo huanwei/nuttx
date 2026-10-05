@@ -145,6 +145,23 @@ int prctl(int option, ...)
           return ort_ready_get((pid_t)va_arg(ap, int));
         }
 
+      case PR_GET_ORT_DOMCAP:
+        {
+          /* [ORT] 域容量查询（手册 §三·补五十四）：本架构功能上能给的
+           *   域数（常量）。返回**容量**而不是当前预算 —— 部署方要在
+           *   设置配额之前用它做校验。无权限要求（只读标量）。 */
+
+          return ort_domain_capacity();
+        }
+
+      case PR_SET_ORT_DOMQUOTA:
+        {
+          /* [ORT] 域配额收紧：**只有监督者**（权限判断在实现里，
+           *   与绑域同规矩）。只紧不松；0 无意义（零初始化 = 未设）。 */
+
+          return ort_domain_quota_set((int)va_arg(ap, int));
+        }
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
       case PR_ORT_SUPERVISOR_RESET:
         {

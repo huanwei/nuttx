@@ -47,6 +47,10 @@
 static int g_pool_region = -1;   /* 整个池：no-access（低优先级） */
 static int g_own_region  = -1;   /* 本容器块：user RW（高优先级） */
 
+/* region 分配失败的表示（零初始化 = 正常，方向安全）。详见 lazyinit。 */
+
+static bool g_memdomain_broken;
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -78,17 +82,42 @@ static int g_own_region  = -1;   /* 本容器块：user RW（高优先级） */
 
 static void ort_memdomain_lazyinit(void)
 {
-  g_pool_region = (int)mpu_configure_region(ORT_DOMAIN_POOL_BASE,
-                                            ORT_DOMAIN_POOL_SIZE,
-                                            ORT_FLAGS_DENY);
+  unsigned int pool;
+  unsigned int own;
 
-  g_own_region  = (int)mpu_configure_region(ORT_DOMAIN_POOL_BASE,
-                                            ORT_DOMAIN_BLOCK_SIZE,
-                                            ORT_FLAGS_ALLOW);
+  pool = mpu_configure_region(ORT_DOMAIN_POOL_BASE, ORT_DOMAIN_POOL_SIZE,
+                              ORT_FLAGS_DENY);
+  own  = mpu_configure_region(ORT_DOMAIN_POOL_BASE, ORT_DOMAIN_BLOCK_SIZE,
+                              ORT_FLAGS_ALLOW);
 
-  /* 高编号 region 优先，必须保证 own > pool */
+  /* ★ 预算耗尽的判据（手册 §三·补五十四）。
+   *
+   *   mpu_allocregion() 在 region 用尽时**不报错** —— 它返回一个越界
+   *   编号（其自带的 DEBUGASSERT 只在 debug 构建拦），而下面的
+   *   "own > pool" 断言会被两个**垃圾编号**同时满足（8 > 7 之类），
+   *   于是 debug 构建也拦不住。越界编号写进 MPU_RNR 被硬件忽略 ——
+   *   region 静默不生效，隔离看起来"配好了"。
+   *
+   *   这就是 S1/H28 那一族的形状：**"配置失败"没有表示**。这里的
+   *   表示 = g_memdomain_broken（零初始化 false = 正常，方向安全）：
+   *     - 响亮报错（配置/构建问题，要在日志上看得见）；
+   *     - 绑域从此一律 -ENOSPC（没有域机制就**不放容器进来** ——
+   *       fail-closed，池保持板级 MPU 的原始 deny，不会裸奔）。
+   */
 
-  DEBUGASSERT(g_own_region > g_pool_region);
+  if (pool >= CONFIG_ARM_MPU_NREGIONS || own >= CONFIG_ARM_MPU_NREGIONS ||
+      own <= pool)
+    {
+      _err("[ORT] memdomain init FAILED: MPU region exhausted/insane "
+           "(pool=%u own=%u, NREGIONS=%d) — ORT domains disabled, "
+           "container bind will fail with -ENOSPC\n",
+           pool, own, CONFIG_ARM_MPU_NREGIONS);
+      g_memdomain_broken = true;
+      return;
+    }
+
+  g_pool_region = (int)pool;
+  g_own_region  = (int)own;
 
   syslog(LOG_INFO, "[ORT] memdomain init: pool_region=%d own_region=%d\n",
          g_pool_region, g_own_region);
@@ -130,6 +159,20 @@ uint32_t ort_caps(void)
 }
 
 /****************************************************************************
+ * Name: ort_domain_capacity
+ *
+ * Description:
+ *   本架构**功能上**能给的域数 = 池块数（手册 §三·补五十四）。
+ *   域号就是块号，池里有多少块就有多少域 —— 不要报"编码上限"。
+ *
+ ****************************************************************************/
+
+int ort_domain_capacity(void)
+{
+  return ORT_DOMAIN_COUNT;
+}
+
+/****************************************************************************
  * Name: ort_container_domain
  *
  * Description:
@@ -167,6 +210,15 @@ int ort_container_bind(pid_t pid, int domain)
       return -EPERM;
     }
 
+  /* ★ 域机制初始化失败（MPU region 预算耗尽，见 lazyinit）→ fail-closed：
+   *   没有域机制就**不放容器进来**。池保持板级 MPU 的原始 deny，
+   *   不会因"机制坏了但流程继续"而裸奔。 */
+
+  if (g_memdomain_broken)
+    {
+      return -ENOSPC;
+    }
+
   /* 取目标任务的 group。用 enter_critical_section 保护 ——
    * 目标任务可能正在退出，group 指针随时可能变。
    */
@@ -182,16 +234,26 @@ int ort_container_bind(pid_t pid, int domain)
 
   group = tcb->group;
 
-  /* 越界 → 视为解除绑定（拒绝访问，而不是给出错误映射） */
+  /* ★ 预算之外的域号 → -EINVAL，**不改动**既有绑定（手册 §三·补五十四）。
+   *
+   *   此前这里的行为是"越界 → 静默解除绑定 + 返回 OK" —— 与 A 侧
+   *   （-EINVAL）语义不同，而且 OK 回执是**假的**：监督者以为绑上了，
+   *   容器其实没绑。现已统一：两个 SKU 都拒绝、报错、不动既有绑定。
+   *
+   *   为什么不保持"解除绑定"这条便路：全树核对过，没有任何调用方
+   *   需要它；而"非法请求改变状态"本身就是坏契约 —— 撤销绑定要有
+   *   显式的动作，不该藏在越界里。
+   *
+   *   注意判的是**预算**（min(容量, 配额)）而不是池块数：
+   *   容量管物理，配额管部署，绑定只看两者取小。 */
 
-  if (domain < 0 || domain >= ORT_DOMAIN_COUNT)
+  if (domain < 0 || domain >= ort_domain_budget())
     {
-      group->tg_ort_domain = ORT_DOMAIN_UNBOUND;
+      leave_critical_section(flags);
+      return -EINVAL;
     }
-  else
-    {
-      group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
-    }
+
+  group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
 
   leave_critical_section(flags);
   return OK;
@@ -211,6 +273,15 @@ void ort_memdomain_switch(FAR struct tcb_s *to)
   uintptr_t base;
   int domain;
   int bound;
+
+  /* 初始化失败（region 预算耗尽）→ 不编程、不重试。
+   * lazyinit 已响亮报错，绑域已 fail-closed；这里静默返回是**正确的
+   * 静默** —— 池保持板级 MPU 的原始 deny，行为可推断。 */
+
+  if (g_memdomain_broken)
+    {
+      return;
+    }
 
   if (g_own_region < 0)
     {

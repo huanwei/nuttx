@@ -423,6 +423,27 @@ void nxtask_exithook(FAR struct tcb_s *tcb, int status)
 
   DEBUGASSERT((tcb->flags & TCB_FLAG_EXIT_PROCESSING) != 0);
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT] 退出码的 SKU 无关落点（手册 §三·补五十四）。
+   *
+   *   ② 的 EXIT 事件要报退出码，而它此前读 group->tg_exitcode ——
+   *   那字段只在 CONFIG_SCHED_HAVE_PARENT 下存在：A 有、M **没有**，
+   *   于是 ② 在 M 构建里根本编译不过（2026-10-05 重建 an500 时暴露：
+   *   ② 自完成后 M 侧从未重建过）。这里把 status 存进 ORT 自己的字段，
+   *   取值口径与 nxtask_exitstatus **逐字一致**：只有组的主任务
+   *   （非 pthread）的 status 才可解释 —— 别让两个来源开始漂移。 */
+
+  if (tcb->group != NULL)
+    {
+#ifndef CONFIG_DISABLE_PTHREAD
+      if ((tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
+#endif
+        {
+          tcb->group->tg_ort_exitcode = status;
+        }
+    }
+#endif
+
   nxsched_dumponexit();
 
   /* If the task was terminated by another task, it may be in an unknown

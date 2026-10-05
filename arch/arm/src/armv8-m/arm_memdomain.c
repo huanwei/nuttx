@@ -63,13 +63,35 @@
 
 static int g_own_region = -1;    /* 域 region 编号（惰性分配） */
 
+/* region 分配失败的表示（零初始化 = 正常，方向安全）。详见 lazyinit。 */
+
+static bool g_memdomain_broken;
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 
 static void ort_memdomain_lazyinit(void)
 {
-  g_own_region = (int)mpu_allocregion();
+  unsigned int own = mpu_allocregion();
+
+  /* ★ 预算耗尽的判据 —— 与 armv7-m 版本同一条债（手册 §三·补五十四）；
+   *   那边有更完整的推导。要点：mpu_allocregion() 在 region 用尽时
+   *   返回**越界编号**而不是报错，越界编号写进 MPU_RNR 被硬件忽略 ——
+   *   region 静默不生效。这里把它变成显式的 broken：
+   *   响亮报错 + 绑域 -ENOSPC（fail-closed）。 */
+
+  if (own >= CONFIG_ARM_MPU_NREGIONS)
+    {
+      _err("[ORT] memdomain(armv8-m) init FAILED: MPU region exhausted "
+           "(own=%u, NREGIONS=%d) — ORT domains disabled, "
+           "container bind will fail with -ENOSPC\n",
+           own, CONFIG_ARM_MPU_NREGIONS);
+      g_memdomain_broken = true;
+      return;
+    }
+
+  g_own_region = (int)own;
 
   mpu_modify_region((unsigned int)g_own_region,
                     ORT_DOMAIN_POOL_BASE, ORT_DOMAIN_DENY_SIZE,
@@ -107,6 +129,13 @@ uint32_t ort_caps(void)
   return ORT_CAP_FAULT_HANDLER;
 }
 
+/* 容量 = 池块数（手册 §三·补五十四）—— 与 armv7-m 同义。 */
+
+int ort_domain_capacity(void)
+{
+  return ORT_DOMAIN_COUNT;
+}
+
 int ort_container_domain(FAR struct task_group_s *group)
 {
   if (group == NULL || !ORT_DOMAIN_VALID(group->tg_ort_domain))
@@ -130,6 +159,13 @@ int ort_container_bind(pid_t pid, int domain)
       return -EPERM;
     }
 
+  /* 域机制初始化失败 → fail-closed（同 armv7-m，见那里的推导） */
+
+  if (g_memdomain_broken)
+    {
+      return -ENOSPC;
+    }
+
   flags = enter_critical_section();
 
   tcb = nxsched_get_tcb(pid);
@@ -141,14 +177,17 @@ int ort_container_bind(pid_t pid, int domain)
 
   group = tcb->group;
 
-  if (domain < 0 || domain >= ORT_DOMAIN_COUNT)
+  /* 预算之外的域号 → -EINVAL，不改动既有绑定 ——
+   * 与 armv7-m / armv7-a 语义统一（手册 §三·补五十四；
+   * 旧的"越界→静默解除绑定+OK"已取消，理由见 armv7-m 版本）。 */
+
+  if (domain < 0 || domain >= ort_domain_budget())
     {
-      group->tg_ort_domain = ORT_DOMAIN_UNBOUND;
+      leave_critical_section(flags);
+      return -EINVAL;
     }
-  else
-    {
-      group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
-    }
+
+  group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
 
   leave_critical_section(flags);
   return OK;
@@ -174,6 +213,13 @@ void ort_memdomain_switch(FAR struct tcb_s *to)
   uintptr_t base;
   int domain;
   int bound;
+
+  /* 初始化失败（region 预算耗尽）→ 不编程、不重试（同 armv7-m）。 */
+
+  if (g_memdomain_broken)
+    {
+      return;
+    }
 
   if (g_own_region < 0)
     {

@@ -237,7 +237,9 @@ static int ort_gate(FAR const void *addr, size_t len)
  *    （c）跨版本兼容（新旧实例的结构体可能不同）。
  ****************************************************************************/
 
-#define ORT_STATE_SLOTS  8
+/* ORT_STATE_SLOTS 已上移到 arm_ortcommon.h —— 它同时是**ORT-A 的域容量**，
+ * 两个含义用一个来源（见头文件里"域预算"一节）。 */
+
 #define ORT_STATE_MAX    64
 
 /* ★★ seqlock：seq 兼作"写入中"标志（见 §三·补二十九·四补）
@@ -838,6 +840,11 @@ int ort_cfg_get(FAR void *buf, size_t cap)
 static pid_t g_supervisor = -1;
 static bool  g_supervisor_pinned;
 
+/* 域配额（手册 §三·补五十四）：0 = 未设 → 预算 = 容量。
+ * 与监督者槽同区（同生命周期：reset 一起清）。 */
+
+static uint16_t g_ort_domquota;
+
 /* ── 故障事件队列 ──────────────────────────────────────────────────────
  *
  * 为什么必须是队列而不是单槽：
@@ -984,6 +991,7 @@ int ort_supervisor_reset(void)
          nxsched_self()->pid);
   g_supervisor        = -1;
   g_supervisor_pinned = false;
+  g_ort_domquota      = 0;      /* 跟着槽位一起回到"未设"（测试复位语义） */
   return OK;
 }
 #endif
@@ -1333,6 +1341,54 @@ int ort_ready_get(pid_t pid)
     }
 
   return tcb->group->tg_ort_ready ? 1 : 0;
+}
+
+/****************************************************************************
+ * Name: 域预算：ort_domain_budget / ort_domain_quota_set
+ *
+ * Description:
+ *   [ORT] 手册 §三·补五十四。三个词分开（头文件里写了定义）：
+ *     容量（各架构）≥ 配额（监督者收窄）→ 预算 = min(两者)。
+ *
+ *   为什么配额要存在（而不是只用容量）：容量是**构建**属性（池有几块），
+ *   配额是**部署**属性（这份 manifest 允许用几块）。两者此前是同一个
+ *   数，部署方只能猜；现在部署可以显式收窄，且由内核**执行** ——
+ *   不是靠 manifest 作者自觉。
+ *
+ *   为什么只能监督者设：与绑域同权限 —— 域预算的分配权就是绑域权。
+ *   信封是容量（物理上限）；每份部署自己声明（省略 = 容量），
+ *   域号 ≥ 配额的绑定一律 -EINVAL（fail-closed、可见）。
+ ****************************************************************************/
+
+int ort_domain_budget(void)
+{
+  int cap = ort_domain_capacity();
+
+  if (g_ort_domquota != 0 && (int)g_ort_domquota < cap)
+    {
+      return (int)g_ort_domquota;
+    }
+
+  return cap;
+}
+
+int ort_domain_quota_set(int n)
+{
+  if (nxsched_self() == NULL || nxsched_self()->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  /* n == 0 会被当成"未设"（零初始化语义），所以设 0 无意义 → 拒绝。
+   * 上界 = 容量：配额只在容量内收窄。 */
+
+  if (n < 1 || n > ort_domain_capacity())
+    {
+      return -EINVAL;
+    }
+
+  g_ort_domquota = (uint16_t)n;
+  return OK;
 }
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET

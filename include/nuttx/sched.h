@@ -527,6 +527,12 @@ struct task_group_s
   uint8_t tg_ort_ready;             /* ④ 就绪上报：容器 init 完成时的显式声明
                                      *   （0 = 未上报；上报后失效 = 运行期问题
                                      *    而非启动期 —— 见 PR_ORT_READY） */
+  int     tg_ort_exitcode;          /* ② 退出码的 **SKU 无关**落点：
+                                     *   tg_exitcode 只在 SCHED_HAVE_PARENT
+                                     *   下存在（A 有 M 无），而 EXIT 事件
+                                     *   两个 SKU 都要报码。取值口径与
+                                     *   nxtask_exitstatus 一致（只记组主任务），
+                                     *   见 task_exithook.c。§三·补五十四。 */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD
