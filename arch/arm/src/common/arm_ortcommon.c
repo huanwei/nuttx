@@ -75,9 +75,23 @@
  *    另一套机制、另一条判据。这道闸门只回答一个问题：
  *    **内核会不会因为调用者给的地址而停机。**
  *
- * ⚠️ 原型限制：不区分读写权限（用户区本来就是 RW），也不防 TOCTOU
- *    （校验完到 memcpy 之间地址空间若被**同一容器的另一个线程**改掉）。
- *    正式实现应当在内核自己的缓冲里做，或把校验与拷贝放进同一个临界区。
+ * ⚠️ 原型限制：不区分读写权限（用户区本来就是 RW）。
+ *
+ * ★ TOCTOU 的**前提分析**（2026-10-05，手册 §三·补五十三）：
+ *   「校验完到 memcpy 之间地址空间被同容器兄弟线程改掉」这条债，
+ *   其触发前提是**运行期存在撤除/改写调用者页表项的原语**。
+ *   本构建下逐条验证：**前提不成立** ——
+ *     匿名/文件 mmap+munmap = 堆内存模拟（无页表项，fs_anonmap/fs_rammap）；
+ *     mprotect = 空实现（fs_mmisc.c）；组析构只在**全组线程退出**时
+ *     （调用者在守 ⇒ 构造上不可达）；exec 是 spawn+exit 模型（无就地换代）。
+ *   页表的**唯一**运行期入口 shmdt()（up_shmdt 真撤页表项）由
+ *   CONFIG_MM_SHM 决定，本构建未开。
+ *
+ *   ⇒ 窗口为空，闸门形态成立。但前提靠**配置**维持，所以下面有
+ *     编译期绊线：打开 MM_SHM 或 PAGING 会当场 #error。
+ *     届时必须先把闸门升级为"校验+拷贝与页表撤除互斥"（或 bounce
+ *     复制），**不能**只删绊线 —— 内核取数异常 = 停机是两 SKU 的
+ *     刻意不变量（见上文）。
  ****************************************************************************/
 
 /* 逐页步进。必须 ≤ 页大小，否则会**跨过**整页的洞。
@@ -87,6 +101,12 @@
 #define ORT_GATE_STEP  4096u
 
 #if defined(CONFIG_ARCH_ADDRENV)
+
+/* 前提绊线：这两个开关会打破上面 TOCTOU 前提分析的"未开"条件。 */
+
+#if defined(CONFIG_MM_SHM) || defined(CONFIG_PAGING)
+#error "ORT pointer gate TOCTOU premise broken: CONFIG_MM_SHM/PAGING allows page-table removal/rewrite at runtime, so the gap between gate and memcpy is no longer safe (kernel data abort -> halt). Read handbook §三·补五十三 and upgrade the gate (mutex vs PTE teardown, or bounce copy) before enabling."
+#endif
 
 /* ORT-A（MMU）：这一页在调用者当前的地址空间里有没有映射。 */
 
