@@ -115,7 +115,45 @@ int prctl(int option, ...)
         {
           /* [ORT] 把自己注册为监督者：内核在容器故障时通知它。
            * 只接受首次注册，重复注册返回 -EBUSY。
+           *
+           * ★ 资格检查（先于槽位检查）：只有**构建期白名单**
+           *   （CONFIG_ORT_SUPERVISOR_TASKNAMES）里的任务名能首次注册。
+           *   缺口原文是"首次注册先到先得"——任何任务抢先调用就能占住
+           *   槽位；白名单把资格从"运行期先到先得"收敛为"构建期声明"。
+           *
+           *   ⚠️ 诚实边界：同一构建内任务名不是安全边界（能改名的任务
+           *   就能过线）。完整鉴权待产品化；此处按实际强度标注。
            */
+
+          {
+            FAR const char *wn = CONFIG_ORT_SUPERVISOR_TASKNAMES;
+            FAR const char *tn = this_task()->name;
+            size_t tl = strlen(tn);
+            bool   ok = false;
+
+            while (*wn != '\0')
+              {
+                FAR const char *comma = strchr(wn, ',');
+                size_t          wl    = comma ? (size_t)(comma - wn)
+                                              : strlen(wn);
+
+                if (wl == tl && strncmp(wn, tn, wl) == 0)
+                  {
+                    ok = true;
+                    break;
+                  }
+
+                wn = comma ? comma + 1 : wn + wl;
+              }
+
+            if (!ok)
+              {
+                _alert("ORT: supervisor registration rejected: "
+                       "task \"%s\" not in [%s]\n",
+                       tn, CONFIG_ORT_SUPERVISOR_TASKNAMES);
+                return -EPERM;
+              }
+          }
 
           return ort_supervisor_set((int)this_task()->pid);
         }

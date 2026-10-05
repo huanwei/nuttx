@@ -2134,6 +2134,25 @@ config ORT_SUPERVISOR_RESET
 		  （《降级状态机设计》§2.1：经鉴权的操作员复位 / 断电重启），
 		  而不是一个任何任务都能调的 prctl。
 
+config ORT_SUPERVISOR_TASKNAMES
+	string "Supervisor task name allow-list (comma separated)"
+	default "ortsup,orttest,ortbad"
+	---help---
+		[ORT] 首次注册监督者的**资格白名单**（按任务名，逗号分隔）。
+
+		ORT 的监督者槽位是钉住的（防顶替），但"**谁有资格做第一次注册**"
+		原本是先到先得 —— 任何任务只要抢先调用
+		`prctl(PR_SET_ORT_SUPERVISOR)` 就能占住槽位。
+
+		本选项把它收敛为**构建期属性**：只有名字在名单里的任务能首次
+		注册，其余一律 -EPERM。默认含三个原型装置（ortsup/orttest/
+		ortbad）；**产品构建应收窄到实际监督者（如 "ortsup"）**。
+
+		⚠️ 诚实边界：同一构建内，任务名不是**安全边界**（能改名的任务
+		就能过线）。这一步把资格从"运行期先到先得"变成"构建期声明"；
+		完整的凭据鉴权留待产品化（与《降级状态机设计》§2.1 的
+		"经鉴权的操作员复位"是同一条产品化线的两端）。
+
 endif # ORT_CONTAINER
 
 menuconfig ORT_CONTAINER
