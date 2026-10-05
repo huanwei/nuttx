@@ -118,6 +118,29 @@
 
 #define PR_ORT_WAIT_ADMISSION 25
 
+/* [ORT] ④ 就绪上报：容器主动宣布"我初始化完了"（2026-10-05，手册 §三·补五十一）
+ *
+ *   r = prctl(PR_ORT_READY);          —— 容器侧：标记本组已就绪
+ *
+ *   语义（H29 的精确版）：
+ *     上报**之前**失效 = 启动期（部署问题 → startup 策略）
+ *     上报**之后**失效 = 运行期（可以先重启）
+ *   启动窗口从"唯一判据"降为**兜底**：不上报的容器仍由窗口判定。
+ *   公理 S1 不受影响 —— 窗口兜底保证"不配合的容器"不会拖住系统。
+ */
+
+#define PR_ORT_READY 26
+
+/* [ORT] ④ 查询某容器组是否已上报就绪。
+ *
+ *   r = prctl(PR_GET_ORT_READY, pid_t pid);
+ *       r == 0    尚未上报 / 已不存在的组
+ *       r == 1    已上报
+ *       r == -EPERM  调用者不是监督者（与 PR_GET_ORT_FAULT 同权限）
+ */
+
+#define PR_GET_ORT_READY 27
+
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *
  *   prctl(PR_SET_ORT_SUPERVISOR);

@@ -1257,6 +1257,53 @@ int ort_wait_admission(unsigned timeout_ms)
   return ret < 0 ? ret : -ETIMEDOUT;
 }
 
+/****************************************************************************
+ * Name: ort_ready_set / ort_ready_get
+ *
+ * Description:
+ *   [ORT] ④ 就绪上报（手册 §三·补五十一）。
+ *
+ *   容器 init 完成时调 set；监督者用 get 把"该组的失效算启动期还是
+ *   运行期"的判据从"纯超时窗口"升级为"显式上报 + 窗口兜底"。
+ *
+ *   没有状态机、没有事件 —— 一个位。刻意保持这个体量：
+ *   "就绪"是容器对自己的声明，内核只负责**记住并转述**，
+ *   任何校验（发布兑现、心跳）都留在策略层，不塞进这个位。
+ ****************************************************************************/
+
+int ort_ready_set(void)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+
+  if (rtcb == NULL || rtcb->group == NULL)
+    {
+      return -EINVAL;
+    }
+
+  rtcb->group->tg_ort_ready = 1;
+  return OK;
+}
+
+int ort_ready_get(pid_t pid)
+{
+  FAR struct tcb_s *tcb;
+
+  if (nxsched_self() == NULL || nxsched_self()->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  tcb = nxsched_get_tcb(pid);
+  if (tcb == NULL || tcb->group == NULL)
+    {
+      /* "不存在"与"未上报"同义：都推不出"已就绪" */
+
+      return 0;
+    }
+
+  return tcb->group->tg_ort_ready ? 1 : 0;
+}
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 /****************************************************************************
  * Name: ort_fault_inject

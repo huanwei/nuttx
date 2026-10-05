@@ -524,6 +524,9 @@ struct task_group_s
                                      *   （0 计数 = 合法初值，零初始化即可用；
                                      *    等待方 PR_ORT_WAIT_ADMISSION，
                                      *    唤醒方 PR_SET_ORT_DOMAIN） */
+  uint8_t tg_ort_ready;             /* ④ 就绪上报：容器 init 完成时的显式声明
+                                     *   （0 = 未上报；上报后失效 = 运行期问题
+                                     *    而非启动期 —— 见 PR_ORT_READY） */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD

@@ -127,6 +127,24 @@ int prctl(int option, ...)
           return ort_wait_admission((unsigned)va_arg(ap, unsigned));
         }
 
+      case PR_ORT_READY:
+        {
+          /* [ORT] ④ 就绪上报：容器宣布本组初始化完成。
+           *   标记打在**自己**的组上 —— 不需要权限（宣布自己就绪
+           *   不伤害任何人；是不是"真的就绪"由失效时的策略区分）。 */
+
+          return ort_ready_set();
+        }
+
+      case PR_GET_ORT_READY:
+        {
+          /* [ORT] ④ 查询某组是否已上报就绪。**只有监督者能查** ——
+           *   与故障队列同权限规矩：就绪状态是监督者的判据输入，
+           *   容器之间互相窥探没有正当用途。 */
+
+          return ort_ready_get((pid_t)va_arg(ap, int));
+        }
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
       case PR_ORT_SUPERVISOR_RESET:
         {

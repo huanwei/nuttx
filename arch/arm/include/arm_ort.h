@@ -65,6 +65,15 @@ void ort_group_exit_notify(pid_t pid, uint8_t ort_domain, int code);
 
 int ort_wait_admission(unsigned timeout_ms);
 
+/* ④ 就绪上报（手册 §三·补五十一）。
+ *   ort_ready_set()        —— 容器侧：标记本组已就绪（OK）。
+ *   ort_ready_get(pid)     —— 监督者侧：0/1；非监督者 -EPERM；
+ *                             组不存在 0（"不存在"与"未上报"同义：
+ *                             都推不出"已就绪"）。 */
+
+int ort_ready_set(void);
+int ort_ready_get(pid_t pid);
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);
 #endif
