@@ -520,6 +520,10 @@ struct task_group_s
 
   uint8_t tg_ort_domain;            /* 0 = 未绑定；n>0 = 域 (n-1)           */
   uint8_t tg_ort_faults;            /* 该容器累计的用户态 memfault 次数     */
+  sem_t   tg_ort_admit;             /* ③ 准入等待：绑域成功时被 post
+                                     *   （0 计数 = 合法初值，零初始化即可用；
+                                     *    等待方 PR_ORT_WAIT_ADMISSION，
+                                     *    唤醒方 PR_SET_ORT_DOMAIN） */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD

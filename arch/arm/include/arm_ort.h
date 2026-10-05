@@ -59,6 +59,12 @@ int ort_supervisor_set(pid_t pid);
 
 void ort_group_exit_notify(pid_t pid, uint8_t ort_domain, int code);
 
+/* ③ 准入协议：阻塞等待监督者把**本组**绑好域（手册 §三·补五十）。
+ *   返回 0 = 已准入；-ETIMEDOUT = 超时；其它负值 = errno。
+ *   唤醒方 = PR_SET_ORT_DOMAIN 处理器（绑域成功即 post）。 */
+
+int ort_wait_admission(unsigned timeout_ms);
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);
 #endif

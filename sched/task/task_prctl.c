@@ -85,8 +85,26 @@ int prctl(int option, ...)
 
           int domain = va_arg(ap, int);
           int pid    = va_arg(ap, int);
+          int ret    = ort_container_bind((pid_t)pid, domain);
 
-          return ort_container_bind((pid_t)pid, domain);
+          /* ── ③ 准入协议（2026-10-05，手册 §三·补五十）─────────────
+           *
+           *   绑定成功 → 唤醒正在 `PR_ORT_WAIT_ADMISSION` 上阻塞的容器。
+           *   唤醒点放在这里（公共层）而不是三个 arch 的
+           *   ort_container_bind 里：绑定只有一处"成功"的定义，
+           *   唤醒也只该有一处 —— 与"一个标志位只回答一个问题"同规矩。 */
+
+          if (ret == OK)
+            {
+              FAR struct tcb_s *target = nxsched_get_tcb((pid_t)pid);
+
+              if (target != NULL && target->group != NULL)
+                {
+                  nxsem_post(&target->group->tg_ort_admit);
+                }
+            }
+
+          return ret;
         }
 
       case PR_GET_ORT_DOMAIN:
@@ -98,6 +116,15 @@ int prctl(int option, ...)
            */
 
           return ort_container_domain(this_task()->group);
+        }
+
+      case PR_ORT_WAIT_ADMISSION:
+        {
+          /* [ORT] ③ 准入协议：阻塞等待监督者绑域（带超时，fail-closed）。
+           *   参数：超时毫秒。已准入立即返回 0；超时返回 -ETIMEDOUT。
+           *   任何任务只等自己的组 —— 不需要权限。 */
+
+          return ort_wait_admission((unsigned)va_arg(ap, unsigned));
         }
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET

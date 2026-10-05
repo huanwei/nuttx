@@ -104,6 +104,20 @@
  */
 #define PR_GET_ORT_DOMAIN 10
 
+/* [ORT] ③ 准入协议：阻塞等待监督者绑域（2026-10-05，手册 §三·补五十）
+ *
+ *   int r = prctl(PR_ORT_WAIT_ADMISSION, unsigned timeout_ms);
+ *       r == 0           已被准入（域已绑好）
+ *       r == -ETIMEDOUT  超时 —— 调用者应 fail-closed（退出）
+ *       其它负值 = errno
+ *
+ * 容器侧代替原来的用户态轮询（usleep 1ms × N 次）：等待实现为内核里的
+ * 信号量等待，不占 CPU；绑定的入口（PR_SET_ORT_DOMAIN）负责唤醒。
+ * 判定以**域字段**为准（post 与超时可能同时发生）。
+ */
+
+#define PR_ORT_WAIT_ADMISSION 25
+
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *
  *   prctl(PR_SET_ORT_SUPERVISOR);

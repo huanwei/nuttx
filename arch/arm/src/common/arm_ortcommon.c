@@ -27,7 +27,9 @@
 
 #include <nuttx/sched.h>
 #include <nuttx/arch.h>
+#include <nuttx/clock.h>
 #include <nuttx/signal.h>
+#include <nuttx/semaphore.h>
 
 #include "arm_ortcommon.h"
 
@@ -1208,6 +1210,51 @@ void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code)
       _alert("ORT: exit notify to supervisor %d failed: %d\n",
              g_supervisor, ret);
     }
+}
+
+/****************************************************************************
+ * Name: ort_wait_admission
+ *
+ * Description:
+ *   [ORT] ③ 准入协议（手册 §三·补五十）：阻塞等待监督者把本组绑好域。
+ *
+ *   返回 0 = 已准入；-ETIMEDOUT = 超时（调用者 fail-closed）；
+ *   其它负值 = errno。
+ *
+ *   等待用**不可打断**的信号量等待：容器在准入前被别的信号打扰，
+ *   不该影响"有没有被准入"这个判定本身。
+ *   唤醒方 = PR_SET_ORT_DOMAIN 处理器（绑定成功即 post）。
+ ****************************************************************************/
+
+int ort_wait_admission(unsigned timeout_ms)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+  int ret;
+
+  if (rtcb == NULL || rtcb->group == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /* 已准入（"先绑后放"的顺序下这是常态快捷路径） */
+
+  if (rtcb->group->tg_ort_domain != 0)
+    {
+      return OK;
+    }
+
+  ret = nxsem_tickwait_uninterruptible(&rtcb->group->tg_ort_admit,
+                                       MSEC2TICK((clock_t)timeout_ms));
+
+  /* ★ 判定以**域字段**为准，不以信号量的返回值为准 ——
+   *   post 与超时可以撞在一起，"到底绑没绑"只有字段知道。 */
+
+  if (rtcb->group->tg_ort_domain != 0)
+    {
+      return OK;
+    }
+
+  return ret < 0 ? ret : -ETIMEDOUT;
 }
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
