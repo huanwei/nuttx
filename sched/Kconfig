@@ -2158,8 +2158,18 @@ endif # ORT_CONTAINER
 menuconfig ORT_CONTAINER
 	bool "[ORT] Container resource binding (prototype)"
 	default n
+	select SIG_DEFAULT
 	---help---
 		[ORT] 序驰 OrdinRT：把容器（task_group_s）作为资源绑定的单位。
+
+		★ select SIG_DEFAULT：不是便利，是**修正一个静默失效的耦合**。
+		  ORT 的终止权（H27）靠"未处理的致命信号执行默认动作"兜底 ——
+		  没有 SIG_DEFAULT，被 SIGSEGV 的通知容器**不会死**，
+		  隔离看起来还在（进程还在跑），实际已经破了。
+		  此前靠构建脚本手工追加 CONFIG_SIG_DEFAULT=y ——
+		  漏一次就是上面那种"症状不是报错"的失效（§十二 待办）。
+		  放进 Kconfig 意味着**忘不掉**：开了 ORT_CONTAINER 就自动带上。
+		  （SIG_SIGKILL_ACTION 在该菜单下 default y，SIGSEGV 覆盖。）
 
 		一个容器 = 一个 task_group_s（任务 + 它的所有 pthread 共享）。
 		容器级的资源（内存域、故障计数……）挂在这里，而不是挂在
