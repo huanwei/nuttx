@@ -70,6 +70,16 @@ int prctl(int option, ...)
   switch (option)
     {
 #ifdef CONFIG_ORT_CONTAINER
+      /* ★ 前置条件（编译期明说，不吃"幽灵报错"）：
+       *   ① 的监督者白名单按**任务名**判资格 —— TASK_NAME_SIZE=0 时
+       *   tcb 里根本没有 name 字段，白名单会以一个指向不存在成员的
+       *   报错炸掉（2026-10-05 建 nucleo-f767zi ORT-M 配置时暴露）。
+       *   这里把依赖钉成一眼能懂的错误。 */
+
+#if CONFIG_TASK_NAME_SIZE < 1
+#  error "CONFIG_ORT_CONTAINER requires CONFIG_TASK_NAME_SIZE > 0 (supervisor whitelist matches task names)"
+#endif
+
       case PR_SET_ORT_DOMAIN:
         {
           /* [ORT] 把**指定容器**绑定到指定域。参数：(int domain, pid_t pid)

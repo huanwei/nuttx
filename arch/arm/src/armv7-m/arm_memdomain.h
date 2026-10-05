@@ -39,9 +39,12 @@
  * 每块必须是 2 的幂且按其大小对齐（MPU 硬约束）。
  */
 
-#define ORT_DOMAIN_POOL_BASE    0x60840000u   /* 池起始（512KB 对齐）      */
-#define ORT_DOMAIN_POOL_SIZE    (64 * 1024)   /* 池总大小 64KB             */
-#define ORT_DOMAIN_BLOCK_SIZE   (16 * 1024)   /* 每域 16KB（2 的幂）       */
+/* 池布局由 Kconfig 决定（§三·补六十：换板必须重设且避开用户堆）。
+ * 默认值 = mps 两板的既有布局，行为零漂移。 */
+
+#define ORT_DOMAIN_POOL_BASE    ((uintptr_t)CONFIG_ORT_DOMAIN_POOL_BASE)
+#define ORT_DOMAIN_POOL_SIZE    (CONFIG_ORT_DOMAIN_POOL_SIZE)
+#define ORT_DOMAIN_BLOCK_SIZE   (CONFIG_ORT_DOMAIN_BLOCK_SIZE)
 #define ORT_DOMAIN_COUNT        (ORT_DOMAIN_POOL_SIZE / ORT_DOMAIN_BLOCK_SIZE)
 
 /* 域绑定值的编码（存在 group->tg_ort_domain）：

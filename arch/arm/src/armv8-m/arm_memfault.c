@@ -145,7 +145,13 @@ int arm_memfault(int irq, void *context, void *arg)
       return OK;
     }
 
-#ifdef CONFIG_BUILD_PROTECTED
+/* [ORT] 这块多出来的判据要 **两个开关同时开**：BUILD_PROTECTED 是它的
+ * 语境（用户态存在），ORT_CONTAINER 是它的依赖（调 ort_contain_* 与
+ * ORT_FAULT_*）。只开 PROTECTED 的构建（如 nucleo-f767zi:knsh 裸板）
+ * 走下面的上游兜底 panic —— 之前只有"两个都开"的 M 配置编过，
+ * 单开 PROTECTED 会编译失败（2026-10-05 建 F767 时暴露）。 */
+
+#if defined(CONFIG_BUILD_PROTECTED) && defined(CONFIG_ORT_CONTAINER)
   /* [ORT] 判别故障是否来自用户态。
    *
    * 判据：faulting PC 落在用户代码区（USERSPACE->us_textstart..us_textend）。

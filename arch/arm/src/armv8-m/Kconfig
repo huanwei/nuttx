@@ -175,3 +175,23 @@ config ORT_MEMDOMAIN
 
 		  结果反而更简单：每次切换一次 mpu_modify_region()，
 		  不需要"池"的概念。
+
+config ORT_DOMAIN_POOL_BASE
+	hex "[ORT] 域池基址"
+	default 0x60840000
+	---help---
+		[ORT] 域池的物理基址（手册 §三·补六十）。
+
+		默认 = mps2-an500 / mps3-an547 的布局（uocram + 256K）。
+		★ 换板必须按该板内存图重设，且**必须避开用户堆区间** ——
+		  mps 上靠"池落在堆到不了的区域"、stm32f7 上靠
+		  DTCMEXCLUDE + 池放 DTCM（见 §60 的两种做法）。
+
+config ORT_DOMAIN_POOL_SIZE
+	int "[ORT] 域池大小（字节）"
+	default 65536
+
+config ORT_DOMAIN_BLOCK_SIZE
+	int "[ORT] 每域块大小（字节，2 的幂）"
+	default 16384
+

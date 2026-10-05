@@ -39,3 +39,11 @@ AFLAGS := $(CFLAGS) -D__ASSEMBLY__
 NXFLATLDFLAGS1 = -r -d -warn-common
 NXFLATLDFLAGS2 = $(NXFLATLDFLAGS1) -T$(TOPDIR)/binfmt/libnxflat/gnu-nxflat-pcrel.ld -no-check-sections
 LDNXFLATFLAGS = -e main -s 2048
+
+# [ORT] 烧录目标（2026-10-05）：本板原先没有 FLASH 定义，make flash 不可用。
+# 用 openocd 的官方板级 cfg（NUCLEO 板载 ST-LINK/V2-1）。
+# 注意：烧完请**关掉 openocd** —— POC 时序测量时调试器挂着会影响被测对象。
+
+define FLASH
+  $(Q) openocd -f board/st_nucleo_f7.cfg -c "program $(1) verify reset exit"
+endef

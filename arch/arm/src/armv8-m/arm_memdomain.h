@@ -49,9 +49,12 @@
  *    但 base 必须按 size 对齐。保持 16KB 只是与 armv7-m 版本一致。
  */
 
-#define ORT_DOMAIN_POOL_BASE    0x60840000u   /* 池起始                    */
-#define ORT_DOMAIN_POOL_SIZE    (64 * 1024)   /* 池总大小 64KB             */
-#define ORT_DOMAIN_BLOCK_SIZE   (16 * 1024)   /* 每域 16KB                 */
+/* 池布局由 Kconfig 决定（§三·补六十：换板必须重设且避开用户堆）。
+ * 默认值 = mps 两板的既有布局，行为零漂移。 */
+
+#define ORT_DOMAIN_POOL_BASE    ((uintptr_t)CONFIG_ORT_DOMAIN_POOL_BASE)
+#define ORT_DOMAIN_POOL_SIZE    (CONFIG_ORT_DOMAIN_POOL_SIZE)
+#define ORT_DOMAIN_BLOCK_SIZE   (CONFIG_ORT_DOMAIN_BLOCK_SIZE)
 #define ORT_DOMAIN_COUNT        (ORT_DOMAIN_POOL_SIZE / ORT_DOMAIN_BLOCK_SIZE)
 
 /* 「不可访问」region 的最小尺寸（PMSAv8 对齐要求：base 按 size 对齐） */
