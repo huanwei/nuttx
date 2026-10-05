@@ -27,6 +27,8 @@
 
 #include <nuttx/sched.h>
 #include <nuttx/arch.h>
+#include <assert.h>
+
 #include <nuttx/clock.h>
 #include <nuttx/signal.h>
 #include <nuttx/semaphore.h>
@@ -1175,6 +1177,39 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
       _alert("ORT: fault notify to supervisor %d failed: %d "
              "(降级能力失效，槽位保持钉住)\n", g_supervisor, ret);
+
+      /* ★ 看门狗（原型级，手册 §三·补五十八）：监督者**失联**的安全动作。
+       *
+       *   为什么在这里判定：故障通知失败且原因是"目标不存在"（-ESRCH）
+       *   = "有容器坏了，而唯一能决策的监督者不在"。终止仍会发生（内核
+       *   终止权不依赖监督者），但**重启/安全态的决策没人做** —— 一个
+       *   无人监督的失效系统继续运行，正是 SAFE_STATIC 明令禁止的状态。
+       *
+       *   分构建策略（与既有约定恰好对齐）：
+       *     产品构建（CONFIG_ORT_SUPERVISOR_RESET 关闭）：**fail-stop**。
+       *       安全功能已丢失，继续跑不可接受。
+       *     测试构建（RESET 打开）：只记录。测试装置会让监督者在
+       *       SAFE_STATE 后正常退场，其后容器的故障是**预期现象**，
+       *       panic 会杀死整套装置（V2/标准场景都见过这条日志）。
+       *
+       *   ⚠️ 只升级**故障**路径，不升级 EXIT 通知：退出通知是信息性的
+       *     （容器已经没了，没有待做的决策）；故障才带决策责任。
+       *
+       *   ⚠️ 如实边界（§58）：这是**事件驱动**的失联检测 —— 覆盖
+       *     "失联后仍有故障"的全部后果性场景；静默失联（此后无任何
+       *     故障）在行为上无差异，但属可观测性缺口（需心跳通道 +
+       *     周期检查任务），归产品化。
+       */
+
+      if (ret == -ESRCH)
+        {
+#ifndef CONFIG_ORT_SUPERVISOR_RESET
+          _alert("ORT: SUPERVISOR LOST at fault time (victim=%d) — "
+                 "safety function unavailable, fail-stop (product build)"
+                 "\n", (int)victim);
+          PANIC();
+#endif
+        }
     }
 }
 
