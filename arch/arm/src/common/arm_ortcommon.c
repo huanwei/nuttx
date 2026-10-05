@@ -881,7 +881,18 @@ static bool g_faultq_nosig;
 
 pid_t ort_supervisor_pid(void)
 {
-  return g_supervisor;
+  /* ★ 未注册时返回 -1 —— 把"谁都不匹配"钉在**唯一出口**上。
+   *
+   *   H28 族的教训（手册 §三·补五十二）："未绑定"的表示要显式，
+   *   不能靠某个静态量的初值**恰好**是 -1 —— 那是"安全挂在一句
+   *   注释上"。此前所有权限判据（本文件 5 处 + 三个 arch 的 bind）
+   *   都是 `pid != ort_supervisor_pid()`，未注册时能否 fail-closed
+   *   取决于 g_supervisor 的初值；现在取决于这一个函数。
+   *
+   *   已钉住后**不查存活**：监督者死了槽位保持钉住（与故障通知
+   *   路径同一规矩，见 ort_fault_notify），因此这里也不能查活。 */
+
+  return g_supervisor_pinned ? g_supervisor : (pid_t)-1;
 }
 
 int ort_supervisor_set(pid_t pid)
@@ -1476,9 +1487,10 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec)
   int retry;
   int ret;
 
-  /* ★ 只有监督者能读 */
+  /* ★ 只有监督者能读。判据走 ort_supervisor_pid()（唯一出口）——
+   *   这里原来直接比 g_supervisor，是全树最后一个绕过出口的判据。 */
 
-  if (nxsched_self()->pid != g_supervisor)
+  if (nxsched_self()->pid != ort_supervisor_pid())
     {
       return -EPERM;
     }
