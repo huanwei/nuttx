@@ -1072,6 +1072,8 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
     s->pc     = pc;
     s->addr   = addr;
     s->faults = faults;
+    s->kind   = 0;      /* FAULT */
+    s->code   = 0;
 
     __atomic_store_n(&s->seq, n, __ATOMIC_RELEASE);
   }
@@ -1132,6 +1134,79 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
       _alert("ORT: fault notify to supervisor %d failed: %d "
              "(降级能力失效，槽位保持钉住)\n", g_supervisor, ret);
+    }
+}
+
+/****************************************************************************
+ * Name: ort_group_exit_notify
+ *
+ * Description:
+ *   [ORT] 上报一条"容器正常退出"事件（kind=1，手册 §三·补四十九）。
+ *
+ *   触发条件（由调用点 group_leave 保证）：组已绑域 **且无故障史** ——
+ *   有故障史的组由 FAULT 事件收尾，不重复上报。
+ *
+ *   ★ 发布协议与 ort_fault_notify **逐字同形**（取号 → 作废 → 写载荷 →
+ *     发布；lost 由读者填）。两份手写副本是本实现的既知代价 ——
+ *     改动任意一处必须同步另一处（等后续合并成公共 post 函数时收回）。
+ ****************************************************************************/
+
+void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code)
+{
+  union sigval value;
+  int ret;
+
+  /* 死掉的容器留下的状态槽不再有人可接续 —— 与故障路径同理作废 */
+
+  ort_state_invalidate((int)ort_domain - 1);
+
+  /* 入队（发布协议同 ort_fault_notify，见其上方注释） */
+
+  {
+    FAR struct ort_faultrec_s *s;
+    uint32_t n;
+    uint32_t slot;
+
+    n    = __atomic_fetch_add(&g_faultq_total, 1u, __ATOMIC_SEQ_CST) + 1u;
+    slot = (n - 1u) % ORT_FAULTQ_SIZE;
+    s    = &g_faultq[slot];
+
+    __atomic_store_n(&s->seq, 0, __ATOMIC_RELEASE);
+
+    s->lost   = 0;      /* ★ 由读者填 —— 见 ort_fault_read 的说明 */
+    s->victim = victim;
+    s->pc     = 0;
+    s->addr   = 0;
+    s->faults = 0;
+    s->kind   = 1;      /* EXIT */
+    s->code   = code;
+
+    __atomic_store_n(&s->seq, n, __ATOMIC_RELEASE);
+  }
+
+  /* 监督者没注册，或退出的就是监督者自己 —— 无人可通知 */
+
+  if (g_supervisor < 0 || g_supervisor == victim)
+    {
+      return;
+    }
+
+#ifdef CONFIG_ORT_SUPERVISOR_RESET
+  /* ⚠️ 仅原型测试：信号总开关与故障路径共用（对照实验用） */
+
+  if (g_faultq_nosig)
+    {
+      return;
+    }
+#endif
+
+  value.sival_int = (int)victim;
+
+  ret = nxsig_queue(g_supervisor, ORT_SIGFAULT, value);
+  if (ret < 0)
+    {
+      _alert("ORT: exit notify to supervisor %d failed: %d\n",
+             g_supervisor, ret);
     }
 }
 

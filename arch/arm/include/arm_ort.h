@@ -45,9 +45,19 @@ int ort_container_bind(pid_t pid, int domain);
 
 int ort_container_domain(FAR struct task_group_s *group);
 
-/* 监督者槽位：首次注册即钉住，之后别的任务一律 -EBUSY。 */
+/* 监督者槽位：首次注册即钉住（且登录名需在构建期白名单内 —— 见
+ * task_prctl.c 的资格检查），之后别的任务一律 -EBUSY。 */
 
 int ort_supervisor_set(pid_t pid);
+
+/* 容器组正常退出通知（kind=EXIT 事件）。
+ *   pid        = 容器组 pid
+ *   ort_domain = 组绑定的域（**原始编码**：tg_ort_domain，域 n 存为 n+1）
+ *   code       = 退出码
+ * 只有"已绑域且无故障史"的组会走到这里（调用点在 group_leave）。
+ * 监督者未注册时静默丢弃 —— 与故障通知同规矩。 */
+
+void ort_group_exit_notify(pid_t pid, uint8_t ort_domain, int code);
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
 int ort_supervisor_reset(void);

@@ -342,11 +342,26 @@ struct ort_faultrec_s
 {
   uint32_t  seq;      /* 递增序号；从 1 开始 */
   uint32_t  lost;     /* 本条之前被丢弃的条数；0 = 无丢失 —— 见下 */
-  int       victim;   /* 故障容器的 pid */
-  uintptr_t pc;       /* 触发故障的指令地址 */
-  uintptr_t addr;     /* 被非法访问的地址 */
-  uint32_t  faults;   /* 该容器累计故障次数 */
+  int       victim;   /* 事件主体（容器组）的 pid */
+  uintptr_t pc;       /* FAULT：触发故障的指令地址；EXIT 恒 0 */
+  uintptr_t addr;     /* FAULT：被非法访问的地址；EXIT 恒 0 */
+  uint32_t  faults;   /* FAULT：该容器累计故障次数；EXIT 恒 0 */
+  uint32_t  kind;     /* 事件类型：0 = FAULT（故障）；1 = EXIT（正常退出） */
+  int32_t   code;     /* EXIT：进程退出码；FAULT 恒 0 */
 };
+
+/* ★ kind 的语义（2026-10-05 加，手册 §三·补四十九）：
+ *
+ *   kind=0 FAULT —— 原有语义，不变。
+ *   kind=1 EXIT  —— **没有故障史**的容器组走到终点（_exit / 主动退出）。
+ *                   有故障史的组由 FAULT 事件收尾，不再补发 EXIT
+ *                   （重启/降级逻辑由 FAULT 驱动，重复上报只会是噪声）。
+ *
+ *   ★ 两种事件共用**同一个队列与同一个序号空间** —— 监督者的
+ *     连续性/缺口记账对全部事件一体生效，不需要第二套审计。
+ *   ⚠️ 本结构是 ABI：扩字段 = 内核与所有读者一起重编（ortsup/orttest
+ *     都源码共编，无版本兼容问题；将来若出现**独立固件读者**，
+ *      需要先加 version 字段 —— 记在这里，别到时候才发现）。 */
 
 /* ★ `lost` 是**由内核的读者侧填的**，不是由生产者填的（2026-10-04 改）。
  *

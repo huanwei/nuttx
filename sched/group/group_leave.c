@@ -194,6 +194,25 @@ void group_leave(FAR struct tcb_s *tcb)
 
       if (release)
         {
+#ifdef CONFIG_ORT_CONTAINER
+          /* [ORT] 容器的一生走到终点（手册 §三·补四十九）。
+           *
+           *   覆盖**正常退出**：已绑域、且**没有故障史**的容器组
+           *   （_exit / 主动退出）。有故障史的组由 FAULT 事件收尾 ——
+           *   监督者的重启/降级逻辑由 FAULT 驱动，再补一条 EXIT
+           *   只是噪声，所以这里排除。
+           *
+           *   ⚠️ 此刻 group 还完整（在 group_release 之前），
+           *      tg_ort_domain / tg_ort_faults / tg_exitcode 都可读。 */
+
+          if (group->tg_ort_domain != 0 && group->tg_ort_faults == 0)
+            {
+              ort_group_exit_notify((pid_t)group->tg_pid,
+                                    (uint8_t)group->tg_ort_domain,
+                                    group->tg_exitcode);
+            }
+#endif
+
           /* Yes.. Release all of the resource held by the task group */
 
           group_release(group);
