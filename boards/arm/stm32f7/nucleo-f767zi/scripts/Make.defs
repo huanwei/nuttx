@@ -44,6 +44,20 @@ LDNXFLATFLAGS = -e main -s 2048
 # 用 openocd 的官方板级 cfg（NUCLEO 板载 ST-LINK/V2-1）。
 # 注意：烧完请**关掉 openocd** —— POC 时序测量时调试器挂着会影响被测对象。
 
+# ★ PROTECTED 构建要烧**两个半边**：内核（nuttx）+ 用户镜像
+#   （nuttx_user.elf，链在 uflash 0x08080000）。只烧内核的症状是
+#   上电后没有任何提示符 —— 用户入口那片 flash 是空的。
+#   openocd 支持直接 program ELF（按段的物理地址写 flash），
+#   所以不需要 .hex（本配置 RAW_BINARY=y，也是这么设的）。
+#   两块之间**不 reset**，最后统一 reset。
+
 define FLASH
-  $(Q) openocd -f board/st_nucleo_f7.cfg -c "program $(1) verify reset exit"
+  $(Q) if [ -f "$(TOPDIR)/nuttx_user.elf" ]; then \
+    openocd -f board/st_nucleo_f7.cfg \
+      -c "program $(1) verify" \
+      -c "program $(TOPDIR)/nuttx_user.elf verify" \
+      -c "reset exit"; \
+  else \
+    openocd -f board/st_nucleo_f7.cfg -c "program $(1) verify reset exit"; \
+  fi
 endef
