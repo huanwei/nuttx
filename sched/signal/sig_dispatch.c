@@ -163,8 +163,29 @@ static int nxsig_queue_action(FAR struct tcb_s *stcb,
               int cpu = stcb->cpu;
               int me  = this_cpu();
 
+              /* [ORT] 上游缺陷本地修复（第 4 处，手册 §三·补七十六）：
+               *
+               *   目标任务正在**另一个核**上 RUNNING 时，这里走**同步**
+               *   nxsched_smp_call_single() —— 而它有一个明写的契约
+               *   "Cannot wait in interrupt context"（sched_smp.c 的
+               *   DEBUGASSERT(!up_interrupt_context())）。从**中断/
+               *   异常上下文**投信号（如 ORT 的收容路径在 abort 向量里
+               *   通知监督者）踩中该断言；release 构建下更糟：会在
+               *   ISR 里 nxsem_wait 死等。
+               *
+               *   触发实测（§76 并发容器）：4 个容器同时在 4 个核上跑，
+               *   监督者自己也在跑——早崩容器的"醒信号"投给它时正好
+               *   命中"跨核 RUNNING"分支 → 断言（serial 流程不炸，因为
+               *   监督者那时阻塞在 waitpid、不走同步分支）。
+               *
+               *   修法：中断上下文里不走同步 smp_call，落回**延迟投递**
+               *   （up_schedule_sigaction 只搬运寄存器上下文，ISR 安全；
+               *   投递在目标的下一处内核边界发生——对"醒信号"这类
+               *   尽力而为的通知语义足够）。 */
+
               stcb->sigdeliver = nxsig_deliver;
-              if (cpu != me && stcb->task_state == TSTATE_TASK_RUNNING)
+              if (cpu != me && stcb->task_state == TSTATE_TASK_RUNNING &&
+                  !up_interrupt_context())
                 {
                   struct sig_arg_s arg;
 
