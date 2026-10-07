@@ -57,6 +57,29 @@ struct sig_arg_s
   bool need_restore;
 };
 
+#ifdef CONFIG_SMP
+/* [ORT] 异步臂装载的静态槽（每目标 CPU 一套）—— 手册 §三·补七十九。
+ *
+ *   为什么需要它们：**ISR/异常上下文**里向"另一核上 RUNNING"的任务投
+ *   信号，不能走同步 nxsched_smp_call_single()（其契约禁止在中断上下文
+ *   等待，sched_smp.c 的 DEBUGASSERT）；而"延迟到目标自己的下次内核
+ *   边界"也不行 —— **用户在跑的任务 xcp.regs 常态是 NULL 哨兵**
+ *   （arm_doirq/arm_syscall 返回路径明写 "about to become invalid"），
+ *   对 NULL 做帧搬运会访存 NULL−XCPTCONTEXT_SIZE（实测 DFAR=0xfffffeb8
+ *   → panic）。正解 = **异步** smp_call：payload 仍然在**目标核的 IRQ
+ *   上下文**里跑 —— 那时目标核刚把 xcp.regs 设成它的活帧（arm_doirq
+ *   入口），搬运合法；而发送方**不等**，ISR 合法。
+ *
+ *   在途不变量（原型）：同一任务由 stcb->sigdeliver 守卫串行；跨任务
+ *   同目标 CPU 的并发由 busy 标志 fail-safe（静默跳过 —— 唤醒是尽力
+ *   而为的通知，故障事件本体在队列里，不靠唤醒送达）。本原型的异步
+ *   目标是监督者（单任务），不变量成立。
+ */
+static struct smp_call_data_s g_ort_sig_call[CONFIG_SMP_NCPUS];
+static struct sig_arg_s      g_ort_sig_arg[CONFIG_SMP_NCPUS];
+static bool                  g_ort_sig_busy[CONFIG_SMP_NCPUS];
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -69,6 +92,14 @@ static int sig_handler(FAR void *cookie)
   irqstate_t flags;
 
   flags = enter_critical_section();
+
+#ifdef CONFIG_SMP
+  /* [ORT] §79：归还异步臂装载的静态槽（同步路径无副作用——
+   * 幂等）。放在存活检查**之前**：目标中途死掉也不留 busy 悬挂。 */
+
+  g_ort_sig_busy[this_cpu()] = false;
+#endif
+
   tcb = nxsched_get_tcb(arg->pid);
 
   if (!tcb || tcb->task_state == TSTATE_TASK_INVALID ||
@@ -184,23 +215,39 @@ static int nxsig_queue_action(FAR struct tcb_s *stcb,
                *   尽力而为的通知语义足够）。 */
 
               stcb->sigdeliver = nxsig_deliver;
-              if (cpu != me && stcb->task_state == TSTATE_TASK_RUNNING &&
-                  !up_interrupt_context())
+              if (cpu != me && stcb->task_state == TSTATE_TASK_RUNNING)
                 {
-                  struct sig_arg_s arg;
-
-                  if ((stcb->flags & TCB_FLAG_CPU_LOCKED) != 0)
+                  if (!up_interrupt_context())
                     {
-                      arg.need_restore   = false;
-                    }
-                  else
-                    {
-                      arg.need_restore   = true;
-                      stcb->flags        |= TCB_FLAG_CPU_LOCKED;
-                    }
+                      struct sig_arg_s arg;
 
-                  arg.pid = stcb->pid;
-                  nxsched_smp_call_single(stcb->cpu, sig_handler, &arg);
+                      if ((stcb->flags & TCB_FLAG_CPU_LOCKED) != 0)
+                        {
+                          arg.need_restore   = false;
+                        }
+                      else
+                        {
+                          arg.need_restore   = true;
+                          stcb->flags        |= TCB_FLAG_CPU_LOCKED;
+                        }
+
+                      arg.pid = stcb->pid;
+                      nxsched_smp_call_single(stcb->cpu, sig_handler, &arg);
+                    }
+                  else if (!g_ort_sig_busy[cpu])
+                    {
+                      /* [ORT] ISR 上下文：异步臂装载（详见文件头的
+                       * 静态槽说明）。payload 在目标核 IRQ 上下文跑，
+                       * 搬运借它刚设好的活帧；发送方不等。 */
+
+                      g_ort_sig_busy[cpu]             = true;
+                      g_ort_sig_arg[cpu].pid          = stcb->pid;
+                      g_ort_sig_arg[cpu].need_restore = true;
+                      stcb->flags                    |= TCB_FLAG_CPU_LOCKED;
+                      nxsched_smp_call_init(&g_ort_sig_call[cpu], sig_handler,
+                                            &g_ort_sig_arg[cpu]);
+                      nxsched_smp_call_single_async(cpu, &g_ort_sig_call[cpu]);
+                    }
                 }
               else
 #endif
