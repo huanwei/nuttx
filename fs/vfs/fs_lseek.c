@@ -73,6 +73,15 @@ off_t file_seek(FAR struct file *filep, off_t offset, int whence)
         {
           return ret;
         }
+
+      /* [ORT-A §三·补六十八] 返回**文件系统报告的结果位置**，不能落到
+       * 底部的 `return filep->f_pos`：对叠层文件系统（unionfs）seek 被
+       * 转发到**内层**文件实例，外层 filep->f_pos 从不更新——返回它会让
+       * 每次成功 seek 都报 0（libelf_read 的 `rpos != offset` 校验随即
+       * 误判失败，且 errval=0 使其"静默成功"，读缓冲一个字节都没填）。
+       */
+
+      return ret;
     }
   else
     {

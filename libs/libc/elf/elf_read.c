@@ -94,7 +94,11 @@ int libelf_read(FAR struct mod_loadinfo_s *loadinfo, FAR uint8_t *buffer,
       errval = _NX_GETERRNO(rpos);
       berr("ERROR: Failed to seek to position %" PRIdOFF ": %d\n",
            offset, errval);
-      return -errval;
+
+      /* [ORT-A §三·补六十八] errval==0 时必须报 -EIO：`return -0` 会
+       * 静默"成功"（历史上这让每次真实 seek 失败都变成空读）。 */
+
+      return errval != 0 ? -errval : -EIO;
     }
 
   while (readsize > 0)
