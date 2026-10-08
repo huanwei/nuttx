@@ -58,6 +58,14 @@ struct sig_arg_s
 };
 
 #ifdef CONFIG_SMP
+/* [ORT §79 常驻烙印记] 每次 up_schedule_sigaction 的来源点（site）/CPU/
+ * 目标 pid —— 与 arm_syscall.c 的帧形态绊线配套：绊线复响时直接带
+ * 四元组（帧态/臂来源）进排查，不再重新设计装置。 */
+
+volatile uint32_t g_ort_arm_site;
+volatile int      g_ort_arm_cpu;
+volatile int      g_ort_arm_pid;
+
 /* [ORT] 异步臂装载的静态槽（每目标 CPU 一套）—— 手册 §三·补七十九。
  *
  *   为什么需要它们：**ISR/异常上下文**里向"另一核上 RUNNING"的任务投
@@ -118,7 +126,27 @@ static int sig_handler(FAR void *cookie)
 
   if (tcb->sigdeliver)
     {
-      up_schedule_sigaction(tcb);
+      /* [ORT §79 缺陷②] 臂装载前校验：**当前帧必须是用户态帧**。
+       *
+       *   本载荷可能在目标**正处于投递装置内部**（SYS 模式、专属栈）
+       *   时执行 —— 那时 xcp.regs 是投递帧（SP=专属栈/内核区），把它
+       *   当用户帧搬运会让用户处理器的调用帧建到内核区，用户 stub
+       *   （arm_signal_handler.S）首条 `push {lr}` 即触 MMU 权限拒。
+       *   实测（缩比装置）：bad usp=0x40058110 saved_cpsr=0x…7f(SYS)。
+       *   （双载荷为什么会出现：sig_dispatch 的 `!sigdeliver` 守卫是
+       *   **跨核非原子的 check-then-set** —— ISR 臂（异步载荷）与
+       *   EXIT 事件臂（同步载荷）在风暴里可同时过闸。）
+       *   非用户帧 → 跳过臂装载：信号留在队列（尽力而为语义；故障
+       *   事件本体在队列里，不靠唤醒送达）。 */
+
+      if (tcb->xcp.regs != NULL &&
+          (tcb->xcp.regs[REG_CPSR] & 0x1f) == 0x10)   /* PSR_MODE_USR */
+        {
+          g_ort_arm_site = 1;      /* [ORT §79] sig_handler 载荷 */
+          g_ort_arm_cpu  = this_cpu();
+          g_ort_arm_pid  = tcb->pid;
+          up_schedule_sigaction(tcb);
+        }
     }
 
   leave_critical_section(flags);
@@ -262,6 +290,9 @@ static int nxsig_queue_action(FAR struct tcb_s *stcb,
                     }
                   else
                     {
+                      g_ort_arm_site = 2;    /* [ORT §79] else 分支直呼 */
+                      g_ort_arm_cpu  = this_cpu();
+                      g_ort_arm_pid  = stcb->pid;
                       up_schedule_sigaction(stcb);
                     }
                 }

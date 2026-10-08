@@ -150,8 +150,6 @@ retry:
    * could be modified by a hostile program.
    */
 
-  rtcb->sigdeliver = NULL;  /* Allows next handler to be scheduled */
-
   /* Then restore the correct state for this thread of execution. */
 
   board_autoled_off(LED_SIGNAL);
@@ -162,6 +160,24 @@ retry:
 #endif
 
   rtcb->xcp.regs = rtcb->xcp.saved_regs;
+
+  /* [ORT §79 缺陷②] sigdeliver 的清零点**必须在帧还原之后**。
+   *
+   *   原位置（up_irq_save 之前、帧仍是投递帧时）会开一个窗口：
+   *   另一核此刻对"跨核 RUNNING"的目标做臂装载（sig_dispatch →
+   *   up_schedule_sigaction）会把**投递帧**当用户帧搬运 —— 帧里
+   *   SP=专属栈（内核区）、CPSR=SYS，于是用户处理器的调用帧建到
+   *   内核区，用户 stub（arm_signal_handler.S）首条 `push {lr}` 即
+   *   触 MMU 权限拒 → arm_dataabort panic。
+   *   实测（缩比装置，§三·补七十九）：
+   *     bad usp=0x4004e3e8 saved_sp=0x4004e3e8 saved_cpsr=0x2000007f
+   *   清在这里：IRQ 已关（本核不会再被 IPI 抢）、xcp.regs 已是
+   *   用户帧（别核的臂装载读到的是安全帧）。窗口里的来信号由
+   *   排队接走（retry 咽喉或下次臂装载顺带投递——尽力而为语义，
+   *   故障事件本体在队列里，不受影响）。 */
+
+  rtcb->sigdeliver = NULL;  /* Allows next handler to be scheduled */
+
   arm_fullcontextrestore();
   UNUSED(regs);
 }

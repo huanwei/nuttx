@@ -432,6 +432,37 @@ uint32_t *arm_syscall(uint32_t *regs)
 
               /* Create a frame for info and copy the kernel info */
 
+#ifdef CONFIG_ORT_CONTAINER
+              /* [ORT §79 常驻绊线] 用户处理器帧的 usp 必须是**用户地址**；
+               * 不是就留一行取证（随后必崩：用户 stub 拿内核 SP 跑，
+               * 首笔栈写 `push {lr}` 触 MMU 权限拒）。
+               *
+               *   此绊线在缺陷②（sigdeliver 清零点过早）破案中打出
+               *   saved_sp/saved_cpsr 两问自证；修复（清零点移到帧还原
+               *   之后）后应**永不再响**——若复响即为残留窗口，直接
+               *   带着本行的四元组进排查。只印不改行为（_alert 一次性）。 */
+
+              if (usp < 0x80000000u)
+                {
+                  extern volatile uint32_t g_ort_arm_site;
+                  extern volatile int      g_ort_arm_cpu;
+                  extern volatile int      g_ort_arm_pid;
+
+                  _alert("ORT§79 probe: bad usp=0x%08x "
+                         "sigdeliver=%p saved_sp=0x%08x saved_cpsr=0x%08x "
+                         "regs_sp=0x%08x pc=0x%08x task=%s "
+                         "arm: site=%u cpu=%d pid=%d\n",
+                         (unsigned)usp, rtcb->sigdeliver,
+                         (unsigned)rtcb->xcp.saved_regs[REG_SP],
+                         (unsigned)rtcb->xcp.saved_regs[REG_CPSR],
+                         (unsigned)regs[REG_SP],
+                         (unsigned)rtcb->xcp.saved_regs[REG_PC],
+                         rtcb->name,
+                         (unsigned)g_ort_arm_site, g_ort_arm_cpu,
+                         g_ort_arm_pid);
+                }
+#endif
+
               usp = usp - (2 * XCPTCONTEXT_SIZE + sizeof(siginfo_t));
               memcpy((void *)usp, (void *)regs[REG_R2], sizeof(siginfo_t));
 
