@@ -859,6 +859,217 @@ static void unionfs_destroy(FAR struct unionfs_inode_s *ui)
 }
 
 /****************************************************************************
+ * Name: unionfs_deny_lower
+ *
+ * Description:
+ *   [ORT §84] 下层只读不变量：任何"仅下层存在"的破坏性操作（unlink/
+ *   rmdir/rename/chstat）一律 fail-closed 并留内核见证。原实现会把这些
+ *   操作直接打到下层 = 改镜像层（写穿污染）。whiteout（真删除语义）
+ *   留待手册 §三·补四十六 路线① 收口。
+ *
+ ****************************************************************************/
+
+static void unionfs_deny_lower(FAR const char *op, FAR const char *relpath)
+{
+  _alert("ORT: unionfs %s denied: %s (lower is read-only, whiteout pending)\n",
+         op, relpath);
+}
+
+/****************************************************************************
+ * Name: unionfs_mkparents
+ *
+ * Description:
+ *   [ORT §84] copy-up 的父目录上移：为 relpath 的每一级祖先目录在上层
+ *   补齐 —— 祖先在下层存在（视图可见）而上层缺失时 mkdir 上层；两处都
+ *   没有（或下层同名为非目录）则返回相应错误（上层单方面造目录不是
+ *   open/mkdir 的语义）。
+ *
+ ****************************************************************************/
+
+static int unionfs_mkparents(FAR struct unionfs_inode_s *ui,
+                             FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR char *path;
+  FAR char *slash;
+  int ret = OK;
+
+  path = fs_heap_strdup(relpath);
+  if (path == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  for (slash = strchr(path + 1, '/'); slash != NULL;
+       slash = strchr(slash + 1, '/'))
+    {
+      *slash = '\0';
+
+      /* 上层已有该目录？ */
+
+      ret = unionfs_trystatdir(umu->um_node, path, umu->um_prefix);
+      if (ret == -ENOENT)
+        {
+          /* 没有 —— 视图里必须（经下层）存在才允许上移 */
+
+          ret = unionfs_trystatdir(uml->um_node, path, uml->um_prefix);
+          if (ret >= 0)
+            {
+              ret = unionfs_trymkdir(umu->um_node, path, umu->um_prefix,
+                                     0777);
+            }
+        }
+
+      *slash = '/';
+
+      if (ret < 0)
+        {
+          break;
+        }
+    }
+
+  fs_heap_free(path);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_copyup
+ *
+ * Description:
+ *   [ORT §84] 写前上移：把下层既有常规文件整份复制到上层（下层 O_RDONLY
+ *   → 上层 O_WRONLY|O_CREAT|O_TRUNC），模式位尽力跟随；成功后打内核
+ *   见证行。调用者须先 unionfs_mkparents() 补齐上层父目录。
+ *
+ ****************************************************************************/
+
+#define UNIONFS_COPYBUFSZ 1024
+
+static int unionfs_copyup(FAR struct unionfs_inode_s *ui,
+                          FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR const struct mountpt_operations *lops = uml->um_node->u.i_mops;
+  FAR const struct mountpt_operations *uops = umu->um_node->u.i_mops;
+  FAR const char *upath;
+  FAR const char *lpath;
+  FAR char *buf;
+  struct file lfile;
+  struct file ufile;
+  struct stat st;
+  off_t total = 0;
+  off_t off;
+  int ret;
+
+  lpath = unionfs_offsetpath(relpath, uml->um_prefix);
+  upath = unionfs_offsetpath(relpath, umu->um_prefix);
+  if (lpath == NULL || upath == NULL)
+    {
+      return -ENOENT;
+    }
+
+  if (lops->open == NULL || lops->read == NULL || lops->close == NULL ||
+      uops->open == NULL || uops->write == NULL || uops->close == NULL)
+    {
+      return -ENOSYS;
+    }
+
+  buf = fs_heap_malloc(UNIONFS_COPYBUFSZ);
+  if (buf == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  /* 下层只读打开（fstat 顺取模式位） */
+
+  memset(&lfile, 0, sizeof(lfile));
+  lfile.f_oflags = O_RDONLY;
+  lfile.f_inode  = uml->um_node;
+
+  ret = lops->open(&lfile, lpath, O_RDONLY, 0);
+  if (ret < 0)
+    {
+      goto errout_with_buf;
+    }
+
+  memset(&st, 0, sizeof(st));
+  if (lops->fstat != NULL)
+    {
+      lops->fstat(&lfile, &st);
+    }
+
+  /* 上层创建 + 整份复制 */
+
+  memset(&ufile, 0, sizeof(ufile));
+  ufile.f_oflags = O_WRONLY | O_CREAT | O_TRUNC;
+  ufile.f_inode  = umu->um_node;
+
+  ret = uops->open(&ufile, upath, O_WRONLY | O_CREAT | O_TRUNC,
+                   (st.st_mode & 0777) != 0 ? (st.st_mode & 0777) : 0666);
+  if (ret < 0)
+    {
+      goto errout_with_lfile;
+    }
+
+  for (;;)
+    {
+      ssize_t nrd = lops->read(&lfile, buf, UNIONFS_COPYBUFSZ);
+      if (nrd < 0)
+        {
+          ret = (int)nrd;
+          goto errout_with_files;
+        }
+
+      if (nrd == 0)
+        {
+          break;
+        }
+
+      for (off = 0; off < nrd; )
+        {
+          ssize_t nwr = uops->write(&ufile, buf + off, nrd - off);
+          if (nwr <= 0)
+            {
+              ret = (nwr < 0) ? (int)nwr : -EIO;
+              goto errout_with_files;
+            }
+
+          off += nwr;
+        }
+
+      total += nrd;
+    }
+
+  ret = OK;
+
+errout_with_files:
+  uops->close(&ufile);
+errout_with_lfile:
+  lops->close(&lfile);
+errout_with_buf:
+  fs_heap_free(buf);
+
+  if (ret >= 0)
+    {
+      /* 模式位尽力跟随（失败不影响语义） */
+
+      if (uops->chstat != NULL && (st.st_mode & 0777) != 0)
+        {
+          struct stat sb;
+
+          memset(&sb, 0, sizeof(sb));
+          sb.st_mode = st.st_mode & 0777;
+          uops->chstat(umu->um_node, upath, &sb, CH_STAT_MODE);
+        }
+
+      _alert("ORT: unionfs copy-up: %s (%ld bytes)\n", relpath, (long)total);
+    }
+
+  return ret;
+}
+
+/****************************************************************************
  * Name: unionfs_open
  ****************************************************************************/
 
@@ -900,35 +1111,106 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
   DEBUGASSERT(um != NULL && um->um_node != NULL &&
               um->um_node->u.i_mops != NULL);
 
-  uf->uf_file.f_oflags = filep->f_oflags;
-  uf->uf_file.f_inode  = um->um_node;
-
-  ret = unionfs_tryopen(&uf->uf_file, relpath, um->um_prefix, oflags, mode);
-  if (ret >= 0)
+  if ((oflags & O_ACCMODE) != O_RDONLY ||
+      (oflags & (O_CREAT | O_TRUNC | O_APPEND)) != 0)
     {
-      /* Successfully opened on file system 1 */
+      /* [ORT §84] 写意图（含 O_CREAT/O_TRUNC/O_APPEND —— 创建与截断
+       * 都是修改）：**先按视图状态定 copy-up，再开上层**。不能靠
+       * "上层 O_CREAT 直接成功建空 shadow" —— 那会把下层既有内容悄悄
+       * 丢掉（append/无截断写），冒烟实测踩过。规则：
+       *   上层已有同名（shadow）→ 直接开上层；
+       *   仅下层有常规文件     → 父目录上移 + 整份 copy-up，再开上层；
+       *   仅下层有目录         → -EISDIR；
+       *   两处都没有           → 父目录上移，创建归上层（无 O_CREAT
+       *                          则照旧 ENOENT）。
+       * **绝不回落下层写**（原实现的回落 = 直写污染镜像层）。
+       */
+
+      FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+      struct stat st;
+
+      ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &st);
+      if (ret < 0)
+        {
+          ret = unionfs_trystat(uml->um_node, relpath, uml->um_prefix, &st);
+          if (ret >= 0)
+            {
+              if (S_ISREG(st.st_mode))
+                {
+                  ret = unionfs_mkparents(ui, relpath);
+                  if (ret >= 0)
+                    {
+                      ret = unionfs_copyup(ui, relpath);
+                    }
+                }
+              else if (S_ISDIR(st.st_mode))
+                {
+                  ret = -EISDIR;
+                }
+              else
+                {
+                  ret = -EINVAL;
+                }
+            }
+          else
+            {
+              /* 下层也没有：父目录上移（祖先须视图可见），建归上层。 */
+
+              ret = unionfs_mkparents(ui, relpath);
+            }
+        }
+
+      if (ret >= 0)
+        {
+          uf->uf_file.f_oflags = filep->f_oflags;
+          uf->uf_file.f_inode  = um->um_node;
+
+          ret = unionfs_tryopen(&uf->uf_file, relpath, um->um_prefix,
+                                oflags, mode);
+        }
+
+      if (ret < 0)
+        {
+          goto errout_with_uf;
+        }
+
+      /* Successfully opened on file system 1 (shadow / copy-up / create) */
 
       uf->uf_ndx = 0;
     }
   else
     {
-      /* Try to open the file on file system 1 */
-
-      um  = &ui->ui_fs[1];
+      /* Read-only open：上层优先（shadow），回落只读下层。 */
 
       uf->uf_file.f_oflags = filep->f_oflags;
       uf->uf_file.f_inode  = um->um_node;
 
       ret = unionfs_tryopen(&uf->uf_file, relpath, um->um_prefix, oflags,
                             mode);
-      if (ret < 0)
+      if (ret >= 0)
         {
-          goto errout_with_lock;
+          /* Successfully opened on file system 1 */
+
+          uf->uf_ndx = 0;
         }
+      else
+        {
+          um  = &ui->ui_fs[1];
 
-      /* Successfully opened on file system 1 */
+          uf->uf_file.f_oflags = filep->f_oflags;
+          uf->uf_file.f_inode  = um->um_node;
 
-      uf->uf_ndx = 1;
+          ret = unionfs_tryopen(&uf->uf_file, relpath, um->um_prefix, oflags,
+                                mode);
+          if (ret < 0)
+            {
+              goto errout_with_uf;
+            }
+
+          /* Successfully opened on file system 1 */
+
+          uf->uf_ndx = 1;
+        }
     }
 
   /* Increment the open reference count */
@@ -944,6 +1226,12 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
 errout_with_lock:
   nxmutex_unlock(&ui->ui_lock);
   return ret;
+
+errout_with_uf:
+  /* [ORT §84] 顺带修复：原实现 open 失败路径泄漏 uf（上游同款）。 */
+
+  fs_heap_free(uf);
+  goto errout_with_lock;
 }
 
 /****************************************************************************
@@ -1070,6 +1358,17 @@ static ssize_t unionfs_write(FAR struct file *filep, FAR const char *buffer,
   DEBUGASSERT(um != NULL && um->um_node != NULL &&
               um->um_node->u.i_mops != NULL);
   ops = um->um_node->u.i_mops;
+
+  /* [ORT §84] 绊线：写意图的 open 一律 copy-up 到上层（uf_ndx==0），
+   * 落到下层 fd 的写 = copy-up 漏网 —— fail-closed，宁可 EROFS 也
+   * 不改镜像层。
+   */
+
+  if (uf->uf_ndx != 0)
+    {
+      _alert("ORT: unionfs BUG: write on lower fd — copy-up missed\n");
+      return -EROFS;
+    }
 
   /* Perform the lower level write operation */
 
@@ -1352,6 +1651,14 @@ static int unionfs_fchstat(FAR const struct file *filep,
               um->um_node->u.i_mops != NULL);
   ops = um->um_node->u.i_mops;
 
+  /* [ORT §84] 绊线：fd 的元数据修改也不许落下层。 */
+
+  if (uf->uf_ndx != 0)
+    {
+      _alert("ORT: unionfs BUG: fchstat on lower fd — copy-up missed\n");
+      return -EROFS;
+    }
+
   /* Perform the lower level change operation */
 
   return ops->fchstat ? ops->fchstat(&uf->uf_file, buf, flags) : -EPERM;
@@ -1387,6 +1694,16 @@ static int unionfs_truncate(FAR struct file *filep, off_t length)
   DEBUGASSERT(um != NULL && um->um_node != NULL &&
               um->um_node->u.i_mops != NULL);
   ops = um->um_node->u.i_mops;
+
+  /* [ORT §84] 绊线：同 unionfs_write —— 截断也绝不打下层 fd
+   * （fd 开在上层 → 正常；开在下层 = copy-up 漏网，fail-closed）。
+   */
+
+  if (uf->uf_ndx != 0)
+    {
+      _alert("ORT: unionfs BUG: truncate on lower fd — copy-up missed\n");
+      return -EROFS;
+    }
 
   /* Perform the lower level write operation */
 
@@ -2202,21 +2519,24 @@ static int unionfs_unlink(FAR struct inode *mountpt,
 
   else
     {
-      /* Check if the file exists with name on file system 2.  The only
-       * reason that we check here is so that we can return the more
-       * meaningful -ENOSYS if file system 2 is a read-only file system.
+      /* [ORT §84] 仅下层存在：删除需要 whiteout（未实现）。原实现把
+       * unlink 直接打在下层 = 删镜像层。fail-closed；目标为目录时保持
+       * 原语义 -EISDIR。whiteout 留待手册 §三·补四十六 路线①。
        */
 
       um  = &ui->ui_fs[1];
       ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
       if (ret >= 0)
         {
-          /* Yes.. Try to unlink the file on file system 1.  This would fail
-           * with -ENOSYS if file system 2 is a read-only only file system or
-           * -EISDIR if the path is not a file.
-           * */
-
-          ret = unionfs_tryunlink(um->um_node, relpath, um->um_prefix);
+          if (S_ISREG(buf.st_mode))
+            {
+              unionfs_deny_lower("unlink", relpath);
+              ret = -EROFS;
+            }
+          else
+            {
+              ret = -EISDIR;
+            }
         }
     }
 
@@ -2233,8 +2553,6 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
   struct stat buf;
-  int ret1;
-  int ret2;
   int ret;
 
   finfo("relpath: %s\n", relpath);
@@ -2261,20 +2579,18 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
       return -EEXIST;
     }
 
-  /* Try to create the directory on both file systems. */
-
-  um  = &ui->ui_fs[0];
-  ret1 = unionfs_trymkdir(um->um_node, relpath, um->um_prefix, mode);
-
-  um  = &ui->ui_fs[1];
-  ret2 = unionfs_trymkdir(um->um_node, relpath, um->um_prefix, mode);
-
-  /* We will say we were successful if we were able to create the
-   * directory on either file system.  Perhaps one file system is
-   * read-only and the other is write-able?
+  /* [ORT §84] 只在上层建目录（父目录先上移）—— 下层视为只读，绝不在
+   * 下层建（原实现"两边都试、有一边成就算成"会把目录建进下层）。
    */
 
-  return (ret1 >= 0 || ret2 >= 0) ? OK : ret1;
+  ret = unionfs_mkparents(ui, relpath);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  um  = &ui->ui_fs[0];
+  return unionfs_trymkdir(um->um_node, relpath, um->um_prefix, mode);
 }
 
 /****************************************************************************
@@ -2296,8 +2612,8 @@ static int unionfs_rmdir(FAR struct inode *mountpt, FAR const char *relpath)
               relpath != NULL);
   ui = mountpt->i_private;
 
-  /* We really don't know any better so we will try to remove the directory
-   * from both file systems.
+  /* [ORT §84] 上层有 → 只删上层（下层同名暴露属已知语义，whiteout 轮
+   * 收口）；仅下层 → 拒绝（原实现会把 rmdir 打到下层 = 删镜像层）。
    */
 
   /* Is there a directory with this name on file system 1 */
@@ -2310,30 +2626,15 @@ static int unionfs_rmdir(FAR struct inode *mountpt, FAR const char *relpath)
        * failure to remove it is a showstopper.
        */
 
-      ret = unionfs_tryrmdir(um->um_node, relpath, um->um_prefix);
-      if (ret < 0)
-        {
-          return ret;
-        }
+      return unionfs_tryrmdir(um->um_node, relpath, um->um_prefix);
     }
-
-  /* Either the directory does not exist on file system 1, or we
-   * successfully removed it.  Try again on file system 2.
-   */
 
   um   = &ui->ui_fs[1];
   tmp = unionfs_trystatdir(um->um_node, relpath, um->um_prefix);
   if (tmp >= 0)
     {
-      /* Yes.. remove it.  Since we know that the directory exists, any
-       * failure to remove it is a showstopper.
-       */
-
-      ret = unionfs_tryrmdir(um->um_node, relpath, um->um_prefix);
-
-      /* REVISIT:  Should we try to restore the directory on file system 1
-       * if we failure to removed the directory on file system 2?
-       */
+      unionfs_deny_lower("rmdir", relpath);
+      return -EROFS;
     }
 
   return ret;
@@ -2385,21 +2686,17 @@ static int unionfs_rename(FAR struct inode *mountpt,
         }
     }
 
-  /* Either the file does not exist on file system 1, or we failed to rename
-   * it (perhaps because the file system was read-only).  Try again on file
-   * system 2.
+  /* [ORT §84] 源仅在下层：rename 需要 copy-up + whiteout 组合（未
+   * 实现），原实现把 rename 直接打在下层 = 改镜像层。fail-closed，
+   * 留待 §三·补四十六 路线①。
    */
 
   um   = &ui->ui_fs[1];
   tmp = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
   if (tmp >= 0)
     {
-      /* Yes.. remove it.  Since we know that the directory exists, any
-       * failure to remove it is a showstopper.
-       */
-
-      ret = unionfs_tryrename(um->um_node, oldrelpath, newrelpath,
-                              um->um_prefix);
+      unionfs_deny_lower("rename", oldrelpath);
+      ret = -EROFS;
     }
 
   return ret;
@@ -2514,14 +2811,22 @@ static int unionfs_chstat(FAR struct inode *mountpt, FAR const char *relpath,
       return OK;
     }
 
-  /* chstat failed on the file system 1.  Try again on file system 2. */
+  /* [ORT §84] chstat 只许落上层；打到下层 = 改镜像层元数据。仅下层
+   * 存在时 fail-closed（正解是 copy-up 后改上层，留待 §三·补四十六
+   * 路线①）。路径两处都不存在时保持 -ENOENT。
+   */
 
   um  = &ui->ui_fs[1];
-  ret = unionfs_trychstat(um->um_node, relpath, um->um_prefix, buf, flags);
-  if (ret >= 0)
-    {
-      return OK;
-    }
+  {
+    struct stat stbuf;
+
+    ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &stbuf);
+    if (ret >= 0)
+      {
+        unionfs_deny_lower("chstat", relpath);
+        return -EROFS;
+      }
+  }
 
   return ret;
 }
