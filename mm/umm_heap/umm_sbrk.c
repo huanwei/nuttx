@@ -34,6 +34,7 @@
 #include <nuttx/addrenv.h>
 #include <nuttx/arch.h>
 #include <nuttx/pgalloc.h>
+#include <nuttx/sched.h>
 
 #include "umm_heap/umm_heap.h"
 
@@ -100,6 +101,11 @@ FAR void *sbrk(intptr_t incr)
       /* Convert the increment to multiples of the page size */
 
       pgincr = MM_NPAGES(incr);
+
+      /* [ORT §82 注] 容器内存限额的增长闸门**不在这里** —— 用户 app 的
+       *   malloc 走 **app 侧** libmm 的那份 sbrk（两份 umm_sbrk 的
+       *  盲区实例，见手册 §三·补八十二），内核副本改不到它。闸门收在
+       *   pgalloc（唯一内核副本，app 侧经 syscall 代理必到）。 */
 
       /* Allocate the requested number of pages and map them to the
        * break address.

@@ -181,6 +181,7 @@ uintptr_t pgalloc(uintptr_t brkaddr, unsigned int npages)
   struct arch_addrenv_s *addrenv;
   uint32_t *l2table;
   uintptr_t paddr;
+  uintptr_t base;
   unsigned int index;
 
   binfo("tcb->pid=%d tcb->group=%p\n", tcb->pid, tcb->addrenv_own);
@@ -201,11 +202,57 @@ uintptr_t pgalloc(uintptr_t brkaddr, unsigned int npages)
       brkaddr = CONFIG_ARCH_HEAP_VBASE;
     }
 
-  DEBUGASSERT(brkaddr >= CONFIG_ARCH_HEAP_VBASE && brkaddr < ARCH_HEAP_VEND);
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §82] 容器内存限额的**增长闸门**：限额要管总量，增长也算。
+   *
+   *   闸门放这里的原因（盲区实例）：用户 app 的 malloc 走 **app 侧**
+   *   libmm 的那份 sbrk（libmm.a 里有 T sbrk/umm_initialize；appa 侧
+   *   pgalloc 是 libproxies 的 syscall 代理）—— kernel 侧的 umm_sbrk
+   *   改不到那条路径。而**两个世界都必经 pgalloc**（app 经代理进来、
+   *   kernel 直调），所以闸门收在这唯一的内核副本上。
+   *   0 = 未设 = 区域上限；超限走文档化的 `return 0`（调用方 → EAGAIN/
+   *   ENOMEM，优雅失败）。 */
+
+  {
+    uint32_t cap = this_task()->group->tg_ort_memcap;
+
+    if (cap > 0 &&
+        brkaddr + ((uintptr_t)npages << MM_PGSHIFT) >
+        CONFIG_ARCH_HEAP_VBASE + (uintptr_t)cap)
+      {
+        return 0;
+      }
+  }
+#endif
+
+  /* [ORT] 上游缺陷本地修复（第 7 处，手册 §三·补八十二）：
+   *
+   *   ① 越界是**合法输入**（默认堆 = 整个 HEAP 区时，"再长一点"
+   *      必然在界外——malloc 耗尽时就会走到这），应按本函数的文档
+   *      契约走失败路径 `return 0`，而不是断言打停机。
+   *   ② 返回**基地址**（文档契约："Normally this will be the same as
+   *      the 'brkaddr' input"）。原实现在循环里累加 brkaddr、返回的
+   *      是**映射尾** —— mm_extend() 的连续性断言必炸（cap 堆实测
+   *      `mm_extend.c:89`）。 */
+
+  if (brkaddr < CONFIG_ARCH_HEAP_VBASE || brkaddr >= ARCH_HEAP_VEND)
+    {
+      return 0;
+    }
+
   DEBUGASSERT(MM_ISALIGNED(brkaddr));
+
+  base = brkaddr;
 
   for (; npages > 0; npages--)
     {
+      if (brkaddr >= ARCH_HEAP_VEND)
+        {
+          /* 半途到界：不回收已映射页（原型；随进程退出回收） */
+
+          return 0;
+        }
+
       /* Get the physical address of the level 2 page table */
 
       paddr = get_pgtable(addrenv, brkaddr);
@@ -250,7 +297,7 @@ uintptr_t pgalloc(uintptr_t brkaddr, unsigned int npages)
                       (uintptr_t)&l2table[index] + sizeof(uint32_t));
     }
 
-  return brkaddr;
+  return base;
 }
 
 #endif /* CONFIG_BUILD_KERNEL */

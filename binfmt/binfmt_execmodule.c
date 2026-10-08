@@ -271,6 +271,15 @@ int exec_module(FAR struct binary_s *binp,
       goto errout_with_addrenv;
     }
 
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_ARCH_ADDRENV) && \
+    defined(CONFIG_BUILD_KERNEL)
+  /* [ORT §82] 内存限额**随派生**落到新组：装载时按派生者的限额夹了
+   * 初始堆（libelf_addrenv_alloc），这里把限额值本身落到新组 —— 此后
+   * 该进程自己 sbrk 增长也按同一限额夹（umm_sbrk）。0 = 未设。 */
+
+  tcb->group->tg_ort_memcap = this_task()->group->tg_ort_memcap;
+#endif
+
   /* The copied argv and envp can now be released */
 
   binfmt_freeactions(actions);
