@@ -31,6 +31,7 @@
 #include <errno.h>
 
 #include <nuttx/irq.h>
+#include <nuttx/semaphore.h>
 #include <nuttx/mm/gran.h>
 
 #include "mm_gran/mm_gran.h"
@@ -62,7 +63,15 @@ int gran_enter_critical(FAR struct gran_s *priv)
   priv->irqstate = spin_lock_irqsave(&priv->lock);
   return OK;
 #else
-  return nxmutex_lock(&priv->lock);
+  /* [ORT] 上游缺陷本地修复（第 8 处，手册 §三·补八十三）：改**不可
+   * 中断**等待 —— 本函数的文档明写 "may return any error reported by
+   * nxsem_wait_uninterruptible()"，且调用方（mm_granfree 等）的断言
+   * 只放行 OK/-ECANCELED、并以 `while (ret < 0)` 重试；但实现调的是
+   * 可中断的 nxmutex_lock（nxsem_wait），**信号雨**下等待返回 -EINTR
+   * ⇒ 断言打停机。本系统实测触发：容器故障的唤醒信号打在 orting 的
+   * gran 等待窗口（1/N 复现）。文档与实现取其一 —— 按文档修。 */
+
+  return nxsem_wait_uninterruptible(&priv->lock.sem);
 #endif
 }
 
