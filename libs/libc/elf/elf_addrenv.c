@@ -29,6 +29,7 @@
 
 #include <nuttx/arch.h>
 #include <nuttx/kmalloc.h>
+#include <nuttx/sched.h>
 
 #include <sys/mman.h>
 #include <sys/param.h>
@@ -88,6 +89,25 @@ int libelf_addrenv_alloc(FAR struct mod_loadinfo_s *loadinfo,
 #else
   size_t heapsize = MAX(ARCH_HEAP_SIZE, CONFIG_ELF_STACKSIZE);
 #endif
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §81] 容器内存限额：**派生者**的组限额夹住被拉起进程的堆。
+   *
+   *   为什么是"派生者"：ELF 装载（本函数）跑在**调用方**的上下文
+   *   （binfmt_execmodule 直到 nxtask_init 才建新组）——语义即
+   *   "本进程拉起的进程，堆不超过 X"，天然无竞态（不像 spawn 后补设
+   *   亲和那样有窗口）。0 = 未设 = 默认（1MB 级，ARCH_HEAP_SIZE）。 */
+
+  {
+    uint32_t cap = nxsched_self()->group->tg_ort_memcap;
+
+    if (cap > 0 && (size_t)cap < heapsize)
+      {
+        heapsize = (size_t)cap;
+      }
+  }
+#endif
+
   FAR struct arch_addrenv_s *addrenv;
   FAR void *vtext;
   FAR void *vdata;

@@ -169,6 +169,20 @@
 
 #define PR_SET_ORT_DOMQUOTA 29
 
+/* [ORT §81] 容器内存限额：为本组**此后拉起**的进程设堆上限。
+ *
+ *   r = prctl(PR_SET_ORT_MEMCAP, int bytes);
+ *       r == 0        已生效
+ *       r == -EINVAL  bytes < 0，或 0 < bytes < 16KB（太小的上限让
+ *                     进程起不来——如实设地板；0 = 解除/默认）
+ *
+ *   语义：ELF 装载跑在**调用方**上下文（libelf_addrenv_alloc 读
+ *   "派生者"的组），所以这是"**本进程拉起的进程**，堆不超过 X" ——
+ *   天然无竞态（不随容器代际传递：拉起的进程自己再派生不受本组的
+ *   限额约束，除非它自己也设）。消费点见 elf_addrenv.c。 */
+
+#define PR_SET_ORT_MEMCAP 30
+
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *
  *   prctl(PR_SET_ORT_SUPERVISOR);

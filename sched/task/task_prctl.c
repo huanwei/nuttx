@@ -172,6 +172,24 @@ int prctl(int option, ...)
           return ort_domain_quota_set((int)va_arg(ap, int));
         }
 
+      case PR_SET_ORT_MEMCAP:
+        {
+          /* [ORT §81] 内存限额：为本组**此后拉起**的进程设堆上限。
+           *   消费点在 libelf_addrenv_alloc（读派生者的组）。
+           *   0 = 解除/默认；正数地板 16KB（太小起不来，如实设地板）。
+           *   非监督者权限（与 rlimit 同类：限制自己派生什么）。 */
+
+          int cap = (int)va_arg(ap, int);
+
+          if (cap < 0 || (cap > 0 && cap < 16 * 1024))
+            {
+              return -EINVAL;
+            }
+
+          this_task()->group->tg_ort_memcap = (uint32_t)cap;
+          return OK;
+        }
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
       case PR_ORT_SUPERVISOR_RESET:
         {
