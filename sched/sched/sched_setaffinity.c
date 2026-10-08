@@ -87,6 +87,19 @@ int nxsched_set_affinity(pid_t pid, size_t cpusetsize,
       return -EINVAL;
     }
 
+  /* [ORT] 上游缺陷本地修复（第 6 处，手册 §三·补八十）：**核号上界校验**。
+   *
+   *   上面只查了"非空"，没查"置位的核都在本机范围内" —— 4 核系统里
+   *   mask=0x200（cpu 9）被**静默接受**；此后调度器安置该任务时
+   *   nxsched_select_cpu() 找不到可用核 → DEBUGASSERT(cpu != 0xff)
+   *   打停机（release 构建下更糟：0xff 会被当索引用）。
+   *   实测触发：`orting lim /v 9`（运行时给容器绑了不存在的核）。 */
+
+  if ((*mask >> CONFIG_SMP_NCPUS) != 0)
+    {
+      return -EINVAL;
+    }
+
   /* Verify that the PID corresponds to a real task */
 
   if (!pid)
