@@ -377,6 +377,13 @@ int nxsig_action(int signo, FAR const struct sigaction *act,
 
 int nxsig_queue(int pid, int signo, union sigval value);
 
+/* [ORT §87] 内核内部投递入口：**不过容器信号闸**（容器只准向自己组
+ * 投信号；这条是给"内核子系统 → 被监督对象/监督者"的跨组通知保留的）。
+ * 语义与 nxsig_queue 逐字相同。使用纪律：只许内核调用 —— 用户侧投递
+ * 一律 nxsig_queue / nxsig_kill / nxsig_tgkill（都过闸）。 */
+
+int nxsig_queue_kernel(int pid, int signo, union sigval value);
+
 /****************************************************************************
  * Name: nxsig_kill
  *

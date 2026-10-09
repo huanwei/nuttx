@@ -1165,7 +1165,10 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
   value.sival_int = (int)victim;
 
-  ret = nxsig_queue(g_supervisor, ORT_SIGFAULT, value);
+  /* [ORT §87] 唤醒走**内核内部投递**（不过容器信号闸）：这是故障者
+   * 容器 → 监督者的跨组通知，是本子系统自己的承重路径。 */
+
+  ret = nxsig_queue_kernel(g_supervisor, ORT_SIGFAULT, value);
   if (ret < 0)
     {
       /* ★ 不清槽。
@@ -1281,7 +1284,10 @@ void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code)
 
   value.sival_int = (int)victim;
 
-  ret = nxsig_queue(g_supervisor, ORT_SIGFAULT, value);
+  /* [ORT §87] 唤醒走**内核内部投递**（不过容器信号闸）：这是故障者
+   * 容器 → 监督者的跨组通知，是本子系统自己的承重路径。 */
+
+  ret = nxsig_queue_kernel(g_supervisor, ORT_SIGFAULT, value);
   if (ret < 0)
     {
       _alert("ORT: exit notify to supervisor %d failed: %d\n",

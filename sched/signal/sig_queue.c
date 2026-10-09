@@ -76,7 +76,7 @@
  *
  ****************************************************************************/
 
-int nxsig_queue(int pid, int signo, union sigval value)
+static int nxsig_queue_common(int pid, int signo, union sigval value)
 {
 #ifdef CONFIG_SCHED_HAVE_PARENT
   FAR struct tcb_s *rtcb = this_task();
@@ -107,6 +107,40 @@ int nxsig_queue(int pid, int signo, union sigval value)
   /* Send the signal */
 
   return nxsig_dispatch(pid, &info, false);
+}
+
+int nxsig_queue(int pid, int signo, union sigval value)
+{
+  /* [ORT §87] 跨组投递闸 —— 用户侧 sigqueue/kill 族走这里或 kill/tgkill
+   * 同款闸；内核子系统对被监督对象的通知走 nxsig_queue_kernel（不过
+   * 闸，见其说明）。 */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+  {
+    int gret = ort_sig_gate(pid);
+    if (gret < 0)
+      {
+        return gret;
+      }
+  }
+#endif
+
+  return nxsig_queue_common(pid, signo, value);
+}
+
+/****************************************************************************
+ * [ORT §87] 内核内部投递入口：**不过容器信号闸**。
+ *
+ *   为什么必须有它：ORT 的故障/退出唤醒是**跨组的内核通知**（故障者
+ *   容器 → 监督者）—— 那是监督者设计的承重路径，不能被子系统自己的
+ *   容器闸挡掉。语义与 nxsig_queue 逐字相同（同一 common 实现），
+ *   差别只在"不查容器归属"。使用纪律：只许内核子系统调用；用户侧
+ *   投递一律走 nxsig_queue / nxsig_kill / nxsig_tgkill。
+ ****************************************************************************/
+
+int nxsig_queue_kernel(int pid, int signo, union sigval value)
+{
+  return nxsig_queue_common(pid, signo, value);
 }
 
 /****************************************************************************

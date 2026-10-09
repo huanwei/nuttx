@@ -93,6 +93,19 @@ int nxsig_kill(pid_t pid, int signo)
 
   if (signo == 0)
     {
+      /* [ORT §87] 存在性探针也过闸 —— 否则容器能拿它探测全局 pid
+       * （监督者/init 在不在），同样是跨组信息面。 */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+      {
+        int gret = ort_sig_gate(pid);
+        if (gret < 0)
+          {
+            return gret;
+          }
+      }
+#endif
+
       return (nxsched_get_tcb(pid) != NULL) ? 0 : -ESRCH;
     }
 
@@ -115,6 +128,18 @@ int nxsig_kill(pid_t pid, int signo)
 #ifdef CONFIG_SCHED_HAVE_PARENT
   info.si_pid             = rtcb->pid;
   info.si_status          = OK;
+#endif
+
+  /* [ORT §87] 跨组投递闸（容器只准打自己组） */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+  {
+    int gret = ort_sig_gate(pid);
+    if (gret < 0)
+      {
+        return gret;
+      }
+  }
 #endif
 
   /* Send the signal */

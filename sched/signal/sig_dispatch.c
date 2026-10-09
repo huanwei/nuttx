@@ -331,6 +331,43 @@ static void nxsig_dispatch_kernel_action(FAR struct tcb_s *stcb,
 #endif /* CONFIG_ENABLE_ALL_SIGNALS */
 
 /****************************************************************************
+ * [ORT §87] 信号面隔离：容器只准向**自己组**投信号。
+ *
+ *   谁算容器：tg_ort_re_root（§86 起，binfmt 派生传播时置位的"容器
+ *   标记"）。非容器（监督者/init/nsh/内核线程组）全程原语义。
+ *
+ *   为什么三条入口都要过它：kill/tgkill/sigqueue 是用户态仅有的三条
+ *   投递路径（POSIX 语义允许"任何进程给任何进程发信号"，容器化后
+ *   这正是要收掉的：容器不能被拿去打监督者、init、别的容器）。
+ *
+ *   内核内部不经此闸：故障/退出唤醒已改**直投**（arm_ortcommon 的
+ *   ort_wake_supervisor），定时器/AIO 的目标天然同组。返回语义与
+ *   原路径对齐：目标不存在 → -ESRCH；跨组 → -EPERM。
+ ****************************************************************************/
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+int ort_sig_gate(pid_t pid)
+{
+  FAR struct tcb_s *rtcb = this_task();
+  FAR struct tcb_s *stcb;
+
+  if (rtcb == NULL || rtcb->group == NULL ||
+      !rtcb->group->tg_ort_re_root)
+    {
+      return OK;
+    }
+
+  stcb = nxsched_get_tcb(pid);
+  if (stcb == NULL)
+    {
+      return -ESRCH;
+    }
+
+  return stcb->group == rtcb->group ? OK : -EPERM;
+}
+#endif
+
+/****************************************************************************
  * Name: nxsig_alloc_pendingsignal
  *
  * Description:

@@ -85,6 +85,18 @@ int nxsig_tgkill(pid_t pid, pid_t tid, int signo)
 
   if (signo == 0)
     {
+      /* [ORT §87] 存在性探针也过闸（同 nxsig_kill） */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+      {
+        int gret = ort_sig_gate(tid);
+        if (gret < 0)
+          {
+            return gret;
+          }
+      }
+#endif
+
       return (nxsched_get_tcb(tid) != NULL) ? 0 : -ESRCH;
     }
 
@@ -108,6 +120,19 @@ int nxsig_tgkill(pid_t pid, pid_t tid, int signo)
 #ifdef CONFIG_SCHED_HAVE_PARENT
   info.si_pid             = rtcb->pid;
   info.si_status          = OK;
+#endif
+
+  /* [ORT §87] 跨组投递闸（容器只准打自己组） */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+  {
+    int gret = ort_sig_gate(tid);
+    if (gret < 0)
+      {
+        ret = gret;
+        goto errout;
+      }
+  }
 #endif
 
   ret = nxsig_dispatch(tid, &info, pid == (pid_t)-1);

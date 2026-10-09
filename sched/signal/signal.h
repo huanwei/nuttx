@@ -190,6 +190,14 @@ int                nxsig_tcbdispatch(FAR struct tcb_s *stcb,
 int                nxsig_dispatch(pid_t pid, FAR siginfo_t *info,
                                   bool thread);
 
+/* [ORT §87] 信号面隔离：容器（tg_ort_re_root）只准向自己组投信号。
+ * 用户三条入口（kill/tgkill/sigqueue）都过它；内核内部投递不经过
+ * （故障唤醒已改直投，定时器/AIO 的目标天然同组）。 */
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+int                ort_sig_gate(pid_t pid);
+#endif
+
 /* sig_cleanup.c */
 
 void               nxsig_cleanup(FAR struct tcb_s *stcb);
