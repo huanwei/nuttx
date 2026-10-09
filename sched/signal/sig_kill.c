@@ -96,7 +96,7 @@ int nxsig_kill(pid_t pid, int signo)
       /* [ORT §87] 存在性探针也过闸 —— 否则容器能拿它探测全局 pid
        * （监督者/init 在不在），同样是跨组信息面。 */
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
       {
         int gret = ort_sig_gate(pid);
         if (gret < 0)
@@ -132,7 +132,7 @@ int nxsig_kill(pid_t pid, int signo)
 
   /* [ORT §87] 跨组投递闸（容器只准打自己组） */
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
   {
     int gret = ort_sig_gate(pid);
     if (gret < 0)

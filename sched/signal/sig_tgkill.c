@@ -87,7 +87,7 @@ int nxsig_tgkill(pid_t pid, pid_t tid, int signo)
     {
       /* [ORT §87] 存在性探针也过闸（同 nxsig_kill） */
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
       {
         int gret = ort_sig_gate(tid);
         if (gret < 0)
@@ -124,7 +124,7 @@ int nxsig_tgkill(pid_t pid, pid_t tid, int signo)
 
   /* [ORT §87] 跨组投递闸（容器只准打自己组） */
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
   {
     int gret = ort_sig_gate(tid);
     if (gret < 0)

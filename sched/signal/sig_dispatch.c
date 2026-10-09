@@ -333,8 +333,10 @@ static void nxsig_dispatch_kernel_action(FAR struct tcb_s *stcb,
 /****************************************************************************
  * [ORT §87] 信号面隔离：容器只准向**自己组**投信号。
  *
- *   谁算容器：tg_ort_re_root（§86 起，binfmt 派生传播时置位的"容器
- *   标记"）。非容器（监督者/init/nsh/内核线程组）全程原语义。
+ *   谁算容器：**已设根（tg_ort_re_root）或已绑域（tg_ort_domain≠0）**
+ *   —— 两个标记都意味着"已被监督者纳入容器管理"（A 侧容器设根，
+ *   M 侧 CG 绑域；§89 起两标记等价纳入）。非容器（监督者/init/nsh/
+ *   内核线程组）全程原语义。
  *
  *   为什么三条入口都要过它：kill/tgkill/sigqueue 是用户态仅有的三条
  *   投递路径（POSIX 语义允许"任何进程给任何进程发信号"，容器化后
@@ -345,14 +347,14 @@ static void nxsig_dispatch_kernel_action(FAR struct tcb_s *stcb,
  *   原路径对齐：目标不存在 → -ESRCH；跨组 → -EPERM。
  ****************************************************************************/
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
 int ort_sig_gate(pid_t pid)
 {
   FAR struct tcb_s *rtcb = this_task();
   FAR struct tcb_s *stcb;
 
   if (rtcb == NULL || rtcb->group == NULL ||
-      !rtcb->group->tg_ort_re_root)
+      (!rtcb->group->tg_ort_re_root && rtcb->group->tg_ort_domain == 0))
     {
       return OK;
     }

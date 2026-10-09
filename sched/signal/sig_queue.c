@@ -115,7 +115,7 @@ int nxsig_queue(int pid, int signo, union sigval value)
    * 同款闸；内核子系统对被监督对象的通知走 nxsig_queue_kernel（不过
    * 闸，见其说明）。 */
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
   {
     int gret = ort_sig_gate(pid);
     if (gret < 0)
