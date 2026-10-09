@@ -290,9 +290,17 @@ static int nxsig_queue_action(FAR struct tcb_s *stcb,
                     }
                   else
                     {
-                      g_ort_arm_site = 2;    /* [ORT §79] else 分支直呼 */
+#ifdef CONFIG_SMP
+                      /* [ORT §79] else 分支直呼（诊断戳只在 SMP 构建存在
+                       * —— 2026-10-09 §86 补编 M 时发现：非 SMP 分支
+                       * 也在编，三个戳变量却是 CONFIG_SMP 守卫定义的，
+                       * M 两 SKU 自 §79 起编译不过。A 侧真值分支逐字
+                       * 保留，语义零变化） */
+
+                      g_ort_arm_site = 2;
                       g_ort_arm_cpu  = this_cpu();
                       g_ort_arm_pid  = stcb->pid;
+#endif
                       up_schedule_sigaction(stcb);
                     }
                 }
