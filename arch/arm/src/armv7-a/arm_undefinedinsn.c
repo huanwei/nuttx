@@ -41,7 +41,7 @@
  * include 了它，本文件漏了，一直以**隐式声明**编译（-Wimplicit 警告；
  * ARM AAPCS 下 bool/int 同走 r0 所以行为侥幸正确）。补上，消除侥幸。 */
 
-#include "common/arm_ortcommon.h"
+#include "arm_ortcommon.h"
 
 /****************************************************************************
  * Public Functions
