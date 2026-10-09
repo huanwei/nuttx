@@ -126,6 +126,31 @@ int nxtask_init(FAR struct tcb_s *tcb, const char *name, int priority,
   nxtask_joininit(tcb);
 #endif
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §86/§88] 容器 root 随派生落到新组 —— 本函数是**所有新组的公共
+   * 聚合点**（task_create / task_spawn / exec_module 全走这里），
+   * 传播放这一处顶三处。设根者自己的组不重挂（tg_ort_re_root 保持
+   * 假——监督者还要走全局路径），只有派生出来的新组执行重挂。 */
+
+  if (this_task()->group != NULL &&
+      this_task()->group->tg_ort_root != NULL)
+    {
+      size_t blen = strlen(this_task()->group->tg_ort_root) + 1;
+      FAR char *root = kmm_malloc(blen);
+
+      if (root == NULL)
+        {
+          ret = -ENOMEM;
+          goto errout_with_group;
+        }
+
+      memcpy(root, this_task()->group->tg_ort_root, blen);
+
+      tcb->group->tg_ort_root    = root;
+      tcb->group->tg_ort_re_root = true;
+    }
+#endif
+
   /* Duplicate the parent tasks environment */
 
   ret = env_dup(tcb->group, envp);

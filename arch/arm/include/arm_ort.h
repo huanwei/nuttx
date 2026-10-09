@@ -111,10 +111,8 @@ int ort_state_get(FAR void *buf, size_t len);
  *                   返回写入长度（含 NUL）/-ENOENT（未设）/-ERANGE。
  * 消费点：fs/inode/fs_inodesearch.c（绝对路径重挂的唯一咽喉）。 */
 
-#ifdef CONFIG_BUILD_KERNEL
 int ort_root_set(FAR const char *userpath);
 int ort_root_get(FAR char *buf, size_t len);
-#endif
 
 /* 某个域发布过多少次。**只给监督者** —— 用于反向证伪容器的
  * `protocol` 声明（声明了会发布，但槽一直是空的）。

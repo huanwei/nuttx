@@ -280,32 +280,6 @@ int exec_module(FAR struct binary_s *binp,
   tcb->group->tg_ort_memcap = this_task()->group->tg_ort_memcap;
 #endif
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
-  /* [ORT §86] 容器 root 随派生落到新组：设根者自己的组**不**重挂
-   * （tg_ort_re_root 保持假 —— 监督者还要访问全局路径），只有这样
-   * 派生出来的新组执行重挂。根字符串每组各持一份（kmm_strdup），
-   * 随组销毁释放（group_leave.c）。 */
-
-  if (this_task()->group != NULL &&
-      this_task()->group->tg_ort_root != NULL)
-    {
-      size_t blen = strlen(this_task()->group->tg_ort_root) + 1;
-      FAR char *root = kmm_malloc(blen);
-
-      if (root == NULL)
-        {
-          berr("ERROR: [ORT §86] failed to propagate container root\n");
-          ret = -ENOMEM;
-          goto errout_with_tcbinit;
-        }
-
-      memcpy(root, this_task()->group->tg_ort_root, blen);
-
-      tcb->group->tg_ort_root    = root;
-      tcb->group->tg_ort_re_root = true;
-    }
-#endif
-
   /* The copied argv and envp can now be released */
 
   binfmt_freeactions(actions);

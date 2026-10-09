@@ -493,7 +493,7 @@ int inode_search(FAR struct inode_search_s *desc)
       fromcwd    = true;
     }
 
-#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+#ifdef CONFIG_ORT_CONTAINER
   /* [ORT §86] 容器 root（chroot 族）：绝对路径重挂到本组的根 ——
    * 这是**唯一咽喉**：VFS 所有按路径的进入点最终都走到这里。
    *

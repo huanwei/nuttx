@@ -1721,12 +1721,9 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec)
  *   path 的用户指针判定走与其它 ORT 接口同一道闸门 —— 而且必须
  *   **逐页**过闸：先求出长度就太晚了（读长度本身就要先碰用户内存）。
  *
- *   ⚠️ 本轮范围 = ORT-A（BUILD_KERNEL）：M 侧两个 SKU 不带此特性
- *      （不编此段，调用 PR_SET/GET_ORT_ROOT 得未实现错误）——
- *      "宁缺勿假"：M 侧没有等价验证前不留静默 no-op。
+ *   ⚠️ §88 起两 SKU 同语义（M 侧运行时已在 an500/an547 实证；
+ *      §86 首发时仅 A 侧，本轮放开）。
  ****************************************************************************/
-
-#ifdef CONFIG_BUILD_KERNEL
 
 #define ORT_ROOT_MAX 128
 
@@ -1870,7 +1867,5 @@ int ort_root_get(FAR char *buf, size_t len)
   memcpy(buf, group->tg_ort_root, n);
   return (int)n;
 }
-
-#endif /* CONFIG_BUILD_KERNEL */
 
 #endif /* CONFIG_ORT_CONTAINER */
