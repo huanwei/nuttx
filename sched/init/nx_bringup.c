@@ -386,6 +386,17 @@ static inline void nx_start_application(void)
                    CONFIG_INIT_SYMTAB, CONFIG_INIT_NEXPORTS, NULL, &attr);
 #endif
   posix_spawnattr_destroy(&attr);
+
+  /* [ORT] 永久诊断（2026-10-09 起）：init 拉起失败是**灾难性**路径，
+   * 但历史上偶发出现且非复现（三标本：§86/§88/§90 轮，均 t≈13ms，
+   * 同一二进制前后多次好启动）——让失败**自带 errno** 再断言，
+   * 下次现场直接给出根因类别。该行正常构建永不打印。 */
+
+  if (ret <= 0)
+    {
+      _alert("ORT: exec_spawn(init) failed ret=%d errno=%d\n", ret, errno);
+    }
+
   DEBUGASSERT(ret > 0);
 #endif /* CONFIG_INIT_NONE */
 }
