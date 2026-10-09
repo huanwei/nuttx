@@ -22,6 +22,7 @@
 #include <debug.h>
 #include <nuttx/debug.h>
 #include <syslog.h>
+#include <sys/stat.h>
 
 #include <sys/prctl.h>
 
@@ -32,6 +33,8 @@
 #include <nuttx/clock.h>
 #include <nuttx/signal.h>
 #include <nuttx/semaphore.h>
+#include <nuttx/kmalloc.h>
+#include <nuttx/fs/fs.h>
 
 #include "arm_ortcommon.h"
 
@@ -1700,5 +1703,168 @@ int ort_fault_read(FAR struct ort_faultrec_s *rec)
 
   return 0;
 }
+
+/****************************************************************************
+ * [ORT §86] 容器 root（chroot 族）：为本组此后派生的进程设根。
+ *
+ *   机制总账：设根值存在 tg_ort_root（字符串，本组持有）；binfmt 把
+ *   它**传播到新组**并置 tg_ort_re_root —— 设根者自己不重挂（监督
+ *   者还要访问全局路径），重挂只发生在容器进程里。消费点唯一：
+ *   fs/inode/fs_inodesearch.c 的 inode_search()。
+ *
+ *   path 的用户指针判定走与其它 ORT 接口同一道闸门 —— 而且必须
+ *   **逐页**过闸：先求出长度就太晚了（读长度本身就要先碰用户内存）。
+ *
+ *   ⚠️ 本轮范围 = ORT-A（BUILD_KERNEL）：M 侧两个 SKU 不带此特性
+ *      （不编此段，调用 PR_SET/GET_ORT_ROOT 得未实现错误）——
+ *      "宁缺勿假"：M 侧没有等价验证前不留静默 no-op。
+ ****************************************************************************/
+
+#ifdef CONFIG_BUILD_KERNEL
+
+#define ORT_ROOT_MAX 128
+
+static int ort_copyin_path(FAR const char *userpath, FAR char *kbuf,
+                           size_t cap)
+{
+  uintptr_t base;
+  size_t n = 0;
+  int ret;
+
+  if (userpath == NULL)
+    {
+      return -EFAULT;
+    }
+
+  base = (uintptr_t)userpath;
+
+  while (n < cap)
+    {
+      /* 每进入新的一页先过闸（跨页续读不能借上一页的通行证） */
+
+      if (((base + n) & (ORT_GATE_STEP - 1u)) == 0)
+        {
+          ret = ort_gate((FAR const void *)(base + n), 1);
+          if (ret < 0)
+            {
+              return ret;
+            }
+        }
+
+      kbuf[n] = ((FAR const char *)base)[n];
+      if (kbuf[n] == '\0')
+        {
+          return OK;
+        }
+
+      n++;
+    }
+
+  return -ENAMETOOLONG;
+}
+
+int ort_root_set(FAR const char *userpath)
+{
+  FAR struct task_group_s *group = nxsched_self()->group;
+  char kbuf[ORT_ROOT_MAX];
+  size_t len;
+  int ret;
+
+  if (group == NULL)
+    {
+      return -EINVAL;
+    }
+
+  /* [§86] 容器不能重设自己的根 —— 改根只能由容器外的监督者做
+   * （与"域只能由监督者下发"同一安全规矩）。 */
+
+  if (group->tg_ort_re_root)
+    {
+      return -EBUSY;
+    }
+
+  ret = ort_copyin_path(userpath, kbuf, sizeof(kbuf));
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* 规范化：必须绝对路径；去掉尾斜杠（避免重挂时出现 "//" 语义
+   * 歧义）；"/" 无意义（= 不设根），拒。 */
+
+  len = strlen(kbuf);
+  while (len > 1 && kbuf[len - 1] == '/')
+    {
+      kbuf[--len] = '\0';
+    }
+
+  if (kbuf[0] != '/' || len <= 1)
+    {
+      return -EINVAL;
+    }
+
+  /* 存在性预检（fail-fast）：设根时解析一次 —— 拼错了当场报，
+   * 而不是让此后每个容器路径都 ENOENT 再回来查。 */
+
+  {
+    struct stat st;
+
+    ret = nx_stat(kbuf, &st, 1);
+    if (ret < 0)
+      {
+        return ret;
+      }
+  }
+
+  if (group->tg_ort_root != NULL)
+    {
+      kmm_free(group->tg_ort_root);
+    }
+
+  {
+    size_t blen = strlen(kbuf) + 1;
+    FAR char *dup = kmm_malloc(blen);
+
+    if (dup == NULL)
+      {
+        group->tg_ort_root = NULL;
+        return -ENOMEM;
+      }
+
+    memcpy(dup, kbuf, blen);
+    group->tg_ort_root = dup;
+  }
+
+  return OK;
+}
+
+int ort_root_get(FAR char *buf, size_t len)
+{
+  FAR struct task_group_s *group = nxsched_self()->group;
+  size_t n;
+  int ret;
+
+  if (group == NULL || group->tg_ort_root == NULL)
+    {
+      return -ENOENT;
+    }
+
+  n = strlen(group->tg_ort_root) + 1;
+  if (buf == NULL || len < n)
+    {
+      return -ERANGE;
+    }
+
+  ret = ort_gate(buf, n);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  memcpy(buf, group->tg_ort_root, n);
+  return (int)n;
+}
+
+#endif /* CONFIG_BUILD_KERNEL */
 
 #endif /* CONFIG_ORT_CONTAINER */

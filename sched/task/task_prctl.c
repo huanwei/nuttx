@@ -190,6 +190,37 @@ int prctl(int option, ...)
           return OK;
         }
 
+      case PR_SET_ORT_ROOT:
+        {
+          /* [ORT §86] 容器 root（chroot 族，仅 ORT-A/BUILD_KERNEL）：
+           *   为本组**此后派生**的进程设根。权限与语义都在
+           *   ort_root_set（容器调用 -EBUSY —— 改根只能由容器外的
+           *   监督者做）。 */
+
+#ifdef CONFIG_BUILD_KERNEL
+          FAR const char *path =
+            (FAR const char *)va_arg(ap, uintptr_t);
+
+          return ort_root_set(path);
+#else
+          return -ENOSYS;
+#endif
+        }
+
+      case PR_GET_ORT_ROOT:
+        {
+          /* [ORT §86] 容器自读设根值（无权限要求：只读本组信息，
+           *   与 PR_GET_ORT_DOMAIN 同规矩）。 */
+
+#ifdef CONFIG_BUILD_KERNEL
+          FAR char *buf = (FAR char *)va_arg(ap, uintptr_t);
+
+          return ort_root_get(buf, (size_t)va_arg(ap, int));
+#else
+          return -ENOSYS;
+#endif
+        }
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
       case PR_ORT_SUPERVISOR_RESET:
         {

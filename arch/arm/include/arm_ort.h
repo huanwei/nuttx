@@ -101,6 +101,21 @@ int ort_supervisor_reset(void);
 int ort_state_put(FAR const void *buf, size_t len);
 int ort_state_get(FAR void *buf, size_t len);
 
+/* [§86] 容器 root（chroot 族，仅 ORT-A/BUILD_KERNEL）：为本组
+ * **此后派生**的进程设根。
+ *
+ *   ort_root_set —— 监督者侧（PR_SET_ORT_ROOT）。path 是用户指针，
+ *                   过闸门后拷入；本组已是容器（tg_ort_re_root）则
+ *                   -EBUSY（容器不能重设自己的根）。
+ *   ort_root_get —— 容器自读（PR_GET_ORT_ROOT）：把本组设根值拷出。
+ *                   返回写入长度（含 NUL）/-ENOENT（未设）/-ERANGE。
+ * 消费点：fs/inode/fs_inodesearch.c（绝对路径重挂的唯一咽喉）。 */
+
+#ifdef CONFIG_BUILD_KERNEL
+int ort_root_set(FAR const char *userpath);
+int ort_root_get(FAR char *buf, size_t len);
+#endif
+
 /* 某个域发布过多少次。**只给监督者** —— 用于反向证伪容器的
  * `protocol` 声明（声明了会发布，但槽一直是空的）。
  * 返回发布次数；0 = 从未发布；负 = errno。 */

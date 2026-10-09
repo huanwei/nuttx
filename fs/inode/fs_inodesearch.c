@@ -469,6 +469,7 @@ static FAR const char *_inode_getcwd(void)
 int inode_search(FAR struct inode_search_s *desc)
 {
   int ret;
+  bool fromcwd = false;
 
   /* Perform the common _inode_search() logic.  This does everything except
    * operations special operations that must be performed on the terminal
@@ -489,7 +490,55 @@ int inode_search(FAR struct inode_search_s *desc)
         }
 
       desc->path = desc->buffer;
+      fromcwd    = true;
     }
+
+#if defined(CONFIG_ORT_CONTAINER) && defined(CONFIG_BUILD_KERNEL)
+  /* [ORT §86] 容器 root（chroot 族）：绝对路径重挂到本组的根 ——
+   * 这是**唯一咽喉**：VFS 所有按路径的进入点最终都走到这里。
+   *
+   *   · 直接给的绝对路径（哪怕拼得像全局的 "/v/..."）**一律**前挂：
+   *     容器不能靠拼全局路径逃出视图（"/v/x" ⇒ "<root>/v/x"）。
+   *   · 由 PWD 相对展开来的路径（NuttX 的 cwd 就是 PWD 环境变量）：
+   *     已在根内（前缀匹配）则原样 —— 它是同一 inode 的全局写法；
+   *     根外（PWD 指向视图之外，真实 chroot 同款的逃逸角）夹回根内。
+   *   · 只在 tg_ort_re_root 的容器组里生效：设根者（监督者）不重挂、
+   *     内核线程组无根 —— 天然 no-op。
+   */
+
+  {
+    FAR struct tcb_s *rtcb = nxsched_self();
+
+    if (rtcb != NULL && rtcb->group != NULL &&
+        rtcb->group->tg_ort_re_root && rtcb->group->tg_ort_root != NULL &&
+        desc->path[0] == '/')
+      {
+        FAR const char *root = rtcb->group->tg_ort_root;
+        size_t rlen = strlen(root);
+        bool within = (strncmp(desc->path, root, rlen) == 0 &&
+                       (desc->path[rlen] == '/' ||
+                        desc->path[rlen] == '\0'));
+
+        if (!fromcwd || !within)
+          {
+            FAR char *rp;
+
+            if (fs_heap_asprintf(&rp, "%s%s", root, desc->path) < 0)
+              {
+                return -ENOMEM;
+              }
+
+            if (desc->buffer != NULL)
+              {
+                fs_heap_free(desc->buffer);
+              }
+
+            desc->buffer = rp;
+            desc->path   = desc->buffer;
+          }
+      }
+  }
+#endif
 
   ret = _inode_search(desc);
 

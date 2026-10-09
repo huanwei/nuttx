@@ -183,6 +183,30 @@
 
 #define PR_SET_ORT_MEMCAP 30
 
+/* [ORT §86] 容器 root（chroot 族，A2）：为本组**此后派生**的进程设根。
+ *
+ *   r = prctl(PR_SET_ORT_ROOT, const char *path);
+ *       r == 0        已生效
+ *       r == -EINVAL  path 非绝对路径 / 为 "/" / 含尾斜杠异常等
+ *       r == -ENOENT  path 解析不到（含视图未挂载）
+ *       r == -EBUSY   本组已是容器（tg_ort_re_root）—— 容器不能重设
+ *                     自己的根，改根只能由**容器外的监督者**设。
+ *       r == -EFAULT  path 指针没过用户指针闸门
+ *
+ *   语义：与 chroot(2) 同族，作用面是**派生方向**（与 PR_SET_ORT_MEMCAP
+ *   同一形状）：设根者自己**不**重挂（监督者还要访问全局路径），
+ *   此后由本组 binfmt 派生（posix_spawn/exec）的新进程组执行重挂 ——
+ *   绝对路径一律前缀重挂；由 PWD 相对展开的路径在根内则原样、根外
+ *   夹回根内（封 cwd 逃逸）。消费点：fs/inode/fs_inodesearch.c
+ *   inode_search()（唯一咽喉）。
+ *
+ *   prctl(PR_GET_ORT_ROOT, char *buf, int len) → 本组当前的设根值
+ *   （自读，无权限要求；容器自报隔离状态用）。返回写入长度（含 NUL）；
+ *   未设 -ENOENT；buf 过小 -ERANGE。 */
+
+#define PR_SET_ORT_ROOT 31
+#define PR_GET_ORT_ROOT 32
+
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *
  *   prctl(PR_SET_ORT_SUPERVISOR);

@@ -272,6 +272,16 @@ void group_drop(FAR struct task_group_s *group)
 
   if (group->tg_flags & GROUP_FLAG_DELETED)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      /* [ORT §86] 容器 root 字符串随组持有，随组释放。 */
+
+      if (group->tg_ort_root != NULL)
+        {
+          kmm_free(group->tg_ort_root);
+          group->tg_ort_root = NULL;
+        }
+#endif
+
       /* Release the group container itself */
 
       kmm_free(group);

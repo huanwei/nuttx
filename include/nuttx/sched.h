@@ -536,6 +536,15 @@ struct task_group_s
                                      *   两个 SKU 都要报码。取值口径与
                                      *   nxtask_exitstatus 一致（只记组主任务），
                                      *   见 task_exithook.c。§三·补五十四。 */
+  FAR char *tg_ort_root;            /* [§86] 容器 root（chroot 族）：绝对
+                                     *   路径重挂前缀。由监督者经
+                                     *   PR_SET_ORT_ROOT 设在**自己组的
+                                     *   派生面**上；binfmt 传播到新组时置
+                                     *   tg_ort_re_root=真。字符串由组持有
+                                     *   （kmm_strdup），组销毁时释放。 */
+  bool    tg_ort_re_root;           /* [§86] 本组是否执行重挂。只由 binfmt
+                                     *   派生传播置位 —— 设根者自己**不**重挂
+                                     *   （监督者还要访问全局路径）。 */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD
