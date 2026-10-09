@@ -144,6 +144,11 @@ static FAR char *unionfs_relpath(FAR const char *path,
 static int     unionfs_unbind_child(FAR struct unionfs_mountpt_s *um);
 static void    unionfs_destroy(FAR struct unionfs_inode_s *ui);
 
+/* [ORT §85] whiteout 视图语义（mkparents 先用后定义） */
+
+static bool    unionfs_lowerhidden(FAR struct unionfs_inode_s *ui,
+                                   FAR const char *relpath);
+
 /* Operations on opened files (with struct file) */
 
 static int     unionfs_open(FAR struct file *filep, FAR const char *relpath,
@@ -858,22 +863,10 @@ static void unionfs_destroy(FAR struct unionfs_inode_s *ui)
   fs_heap_free(ui);
 }
 
-/****************************************************************************
- * Name: unionfs_deny_lower
- *
- * Description:
- *   [ORT §84] 下层只读不变量：任何"仅下层存在"的破坏性操作（unlink/
- *   rmdir/rename/chstat）一律 fail-closed 并留内核见证。原实现会把这些
- *   操作直接打到下层 = 改镜像层（写穿污染）。whiteout（真删除语义）
- *   留待手册 §三·补四十六 路线① 收口。
- *
- ****************************************************************************/
+/* [ORT §85] §84 的 unionfs_deny_lower（下层目标一律拒绝）已随 whiteout
+ * 落地移除：unlink/rmdir/rename/chstat 的"仅下层"路径现已实现真实语义
+ * （白障 / copy-up），不再有拒绝分支。 */
 
-static void unionfs_deny_lower(FAR const char *op, FAR const char *relpath)
-{
-  _alert("ORT: unionfs %s denied: %s (lower is read-only, whiteout pending)\n",
-         op, relpath);
-}
 
 /****************************************************************************
  * Name: unionfs_mkparents
@@ -916,8 +909,17 @@ static int unionfs_mkparents(FAR struct unionfs_inode_s *ui,
           ret = unionfs_trystatdir(uml->um_node, path, uml->um_prefix);
           if (ret >= 0)
             {
-              ret = unionfs_trymkdir(umu->um_node, path, umu->um_prefix,
-                                     0777);
+              if (unionfs_lowerhidden(ui, path))
+                {
+                  /* [ORT §85] 祖先本身被视图屏蔽：不补齐、报不存在 */
+
+                  ret = -ENOENT;
+                }
+              else
+                {
+                  ret = unionfs_trymkdir(umu->um_node, path, umu->um_prefix,
+                                         0777);
+                }
             }
         }
 
@@ -1070,6 +1072,465 @@ errout_with_buf:
 }
 
 /****************************************************************************
+ * Name: unionfs_hidemarker
+ *
+ * Description:
+ *   [ORT §85] 名字是否属于白障命名域（`.wh.` 前缀；含 opaque 标记
+ *   `.wh..wh..opq`）。标记是 unionfs 的私有簿记：视图内不可见、不可
+ *   寻址（解层侧 orting 的 OCI 白障同用此命名域）。
+ *
+ ****************************************************************************/
+
+static bool unionfs_hidemarker(FAR const char *relpath)
+{
+  FAR const char *base;
+
+  if (relpath == NULL || *relpath == '\0')
+    {
+      return false;
+    }
+
+  base = strrchr(relpath, '/');
+  base = (base == NULL) ? relpath : base + 1;
+
+  return strncmp(base, ".wh.", 4) == 0;
+}
+
+/****************************************************************************
+ * Name: unionfs_iswhiteout
+ *
+ * Description:
+ *   [ORT §85] relpath 是否被上层白障遮蔽（上层同目录存在 `.wh.<名>`）。
+ *   标记自身不算被白障。用裸 trystat（不经视图语义，防递归）。
+ *
+ ****************************************************************************/
+
+static bool unionfs_iswhiteout(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR const char *base;
+  FAR char *dir = NULL;
+  FAR char *marker = NULL;
+  struct stat buf;
+  bool found;
+
+  if (relpath == NULL || *relpath == '\0' ||
+      unionfs_hidemarker(relpath))
+    {
+      return false;
+    }
+
+  base = strrchr(relpath, '/');
+  if (base != NULL)
+    {
+      dir = fs_heap_strndup(relpath, base - relpath);
+      if (dir == NULL)
+        {
+          return false;                /* 内存不足：保守按"无白障" */
+        }
+
+      base++;
+    }
+  else
+    {
+      base = relpath;
+    }
+
+  if (dir != NULL)
+    {
+      if (fs_heap_asprintf(&marker, "%s/.wh.%s", dir, base) < 0)
+        {
+          marker = NULL;
+        }
+    }
+  else if (fs_heap_asprintf(&marker, ".wh.%s", base) < 0)
+    {
+      marker = NULL;
+    }
+
+  found = (marker != NULL &&
+           unionfs_trystat(umu->um_node, marker, umu->um_prefix, &buf) >= 0);
+
+  fs_heap_free(marker);
+  fs_heap_free(dir);
+  return found;
+}
+
+/****************************************************************************
+ * Name: unionfs_isopaque
+ *
+ * Description:
+ *   [ORT §85] 目录是否带 opaque 标记（上层 `<目录>/.wh..wh..opq`）——
+ *   视图里**屏蔽下层同目录的全部子项**（"删目录后重建"的语义：新目录
+ *   是全新的，下层旧内容不得渗出）。根目录 relpath = ""。
+ *
+ ****************************************************************************/
+
+static bool unionfs_isopaque(FAR struct unionfs_inode_s *ui,
+                             FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR char *marker = NULL;
+  struct stat buf;
+  bool found;
+
+  if (relpath == NULL)
+    {
+      return false;
+    }
+
+  if (*relpath == '\0')
+    {
+      if (fs_heap_asprintf(&marker, ".wh..wh..opq") < 0)
+        {
+          marker = NULL;
+        }
+    }
+  else if (fs_heap_asprintf(&marker, "%s/.wh..wh..opq", relpath) < 0)
+    {
+      marker = NULL;
+    }
+
+  found = (marker != NULL &&
+           unionfs_trystat(umu->um_node, marker, umu->um_prefix, &buf) >= 0);
+
+  fs_heap_free(marker);
+  return found;
+}
+
+/****************************************************************************
+ * Name: unionfs_lowerhidden
+ *
+ * Description:
+ *   [ORT §85] 下层路径是否被视图屏蔽 —— **逐级**祖先检查（白障使该级
+ *   隐；opq 使其下全部下层子项隐）加叶节点白障。必须逐级：VFS 把完整
+ *   relpath 直接交给 mountpt ops，不经逐组件解析 —— 只查叶节点会让
+ *   `dirX/f` 从被删除的 dirX 下漏出来。
+ *
+ ****************************************************************************/
+
+static bool unionfs_lowerhidden(FAR struct unionfs_inode_s *ui,
+                                FAR const char *relpath)
+{
+  FAR char *dup;
+  FAR char *slash;
+  bool hidden = false;
+
+  if (relpath == NULL || *relpath == '\0')
+    {
+      return false;
+    }
+
+  dup = fs_heap_strdup(relpath);
+  if (dup == NULL)
+    {
+      return false;
+    }
+
+  for (slash = strchr(dup + 1, '/'); slash != NULL;
+       slash = strchr(slash + 1, '/'))
+    {
+      *slash = '\0';
+
+      hidden = unionfs_iswhiteout(ui, dup) || unionfs_isopaque(ui, dup);
+
+      *slash = '/';
+
+      if (hidden)
+        {
+          break;
+        }
+    }
+
+  fs_heap_free(dup);
+
+  if (!hidden)
+    {
+      hidden = unionfs_iswhiteout(ui, relpath);
+    }
+
+  return hidden;
+}
+
+/****************************************************************************
+ * Name: unionfs_mkmarker
+ *
+ * Description:
+ *   [ORT §85] 建标记：whiteout（`<父>/.wh.<名>`，隐藏下层同名项）或
+ *   opaque（`<目录>/.wh..wh..opq`，屏蔽下层子项）。父目录先上移；成功
+ *   打内核见证行。
+ *
+ ****************************************************************************/
+
+static int unionfs_mkmarker(FAR struct unionfs_inode_s *ui,
+                            FAR const char *relpath, bool opaque)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR const struct mountpt_operations *ops = umu->um_node->u.i_mops;
+  FAR const char *base;
+  FAR const char *mrel;
+  FAR char *dir = NULL;
+  FAR char *marker = NULL;
+  struct file mfile;
+  int ret;
+
+  if (relpath == NULL || *relpath == '\0' ||
+      unionfs_hidemarker(relpath))
+    {
+      return -EINVAL;
+    }
+
+  ret = unionfs_mkparents(ui, relpath);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (opaque)
+    {
+      if (fs_heap_asprintf(&marker, "%s/.wh..wh..opq", relpath) < 0)
+        {
+          marker = NULL;
+        }
+    }
+  else
+    {
+      base = strrchr(relpath, '/');
+      if (base != NULL)
+        {
+          dir = fs_heap_strndup(relpath, base - relpath);
+          if (dir == NULL)
+            {
+              return -ENOMEM;
+            }
+
+          base++;
+        }
+      else
+        {
+          base = relpath;
+        }
+
+      if (dir != NULL)
+        {
+          if (fs_heap_asprintf(&marker, "%s/.wh.%s", dir, base) < 0)
+            {
+              marker = NULL;
+            }
+        }
+      else if (fs_heap_asprintf(&marker, ".wh.%s", base) < 0)
+        {
+          marker = NULL;
+        }
+    }
+
+  if (marker == NULL || ops->open == NULL || ops->close == NULL)
+    {
+      ret = -ENOMEM;
+      goto errout;
+    }
+
+  mrel = unionfs_offsetpath(marker, umu->um_prefix);
+  if (mrel == NULL)
+    {
+      ret = -ENOENT;
+      goto errout;
+    }
+
+  memset(&mfile, 0, sizeof(mfile));
+  mfile.f_oflags = O_WRONLY | O_CREAT | O_TRUNC;
+  mfile.f_inode  = umu->um_node;
+
+  ret = ops->open(&mfile, mrel, O_WRONLY | O_CREAT | O_TRUNC, 0);
+  if (ret < 0)
+    {
+      goto errout;
+    }
+
+  ops->close(&mfile);
+  ret = OK;
+
+  if (opaque)
+    {
+      _alert("ORT: unionfs opaque: %s\n", relpath);
+    }
+  else
+    {
+      _alert("ORT: unionfs whiteout: %s\n", relpath);
+    }
+
+errout:
+  fs_heap_free(marker);
+  fs_heap_free(dir);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_dirviewempty
+ *
+ * Description:
+ *   [ORT §85] 目录在**视图**里是否为空（rmdir 的 ENOTEMPTY 判定）：
+ *   上层项跳过标记；下层项跳过标记、被上层同名遮蔽的、被上层白障
+ *   遮蔽的；opaque 目录直接屏蔽下层全部子项。返回 OK=空，
+ *   -ENOTEMPTY=非空，其它负值为底层错误（fail-closed）。
+ *
+ ****************************************************************************/
+
+static int unionfs_dirviewempty(FAR struct unionfs_inode_s *ui,
+                                FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *um;
+  FAR const struct mountpt_operations *ops;
+  FAR struct fs_dirent_s *dir;
+  struct dirent entry;
+  struct stat buf;
+  int ndx;
+  int ret;
+
+  for (ndx = 0; ndx <= 1; ndx++)
+    {
+      if (ndx == 1 && unionfs_isopaque(ui, relpath))
+        {
+          /* [ORT §85] opaque：下层子项整体屏蔽 */
+
+          break;
+        }
+
+      um = &ui->ui_fs[ndx];
+      ops = um->um_node->u.i_mops;
+      dir = NULL;
+
+      ret = unionfs_tryopendir(um->um_node, relpath, um->um_prefix, &dir);
+      if (ret < 0)
+        {
+          continue;                    /* 该侧没有此目录 */
+        }
+
+      for (;;)
+        {
+          ret = ops->readdir(um->um_node, dir, &entry);
+          if (ret == -ENOENT)
+            {
+              ret = OK;                /* 该侧列完 */
+              break;
+            }
+
+          if (ret < 0)
+            {
+              break;                   /* 底层错误：fail-closed 上报 */
+            }
+
+          if (unionfs_hidemarker(entry.d_name))
+            {
+              continue;
+            }
+
+          if (ndx == 1)
+            {
+              FAR char *cpath = unionfs_relpath(relpath, entry.d_name);
+
+              if (cpath != NULL)
+                {
+                  if (unionfs_trystat(ui->ui_fs[0].um_node, cpath,
+                                      ui->ui_fs[0].um_prefix, &buf) >= 0 ||
+                      unionfs_iswhiteout(ui, cpath))
+                    {
+                      fs_heap_free(cpath);
+                      continue;
+                    }
+
+                  fs_heap_free(cpath);
+                }
+            }
+
+          ret = -ENOTEMPTY;
+          break;
+        }
+
+      if (ops->closedir != NULL)
+        {
+          ops->closedir(um->um_node, dir);
+        }
+
+      if (ret == -ENOTEMPTY || ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  return OK;
+}
+
+/****************************************************************************
+ * Name: unionfs_clearmarkers
+ *
+ * Description:
+ *   [ORT §85] 清掉上层目录内的全部标记（`.wh.*`）。rmdir 前用：视图
+ *   已判空的上层目录，物理上只剩标记 —— tmpfs 视它们为真文件，不清掉
+ *   会报 EBUSY（冒烟实测 errno=16）。逐个单查单删（不在枚举中途
+ *   unlink，防迭代器失效）。
+ *
+ ****************************************************************************/
+
+static int unionfs_clearmarkers(FAR struct unionfs_inode_s *ui,
+                                FAR const char *dirrelpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR const struct mountpt_operations *ops = umu->um_node->u.i_mops;
+  FAR struct fs_dirent_s *dir;
+  struct dirent entry;
+  FAR char *mpath;
+  int ret;
+
+  for (;;)
+    {
+      mpath = NULL;
+      dir   = NULL;
+
+      ret = unionfs_tryopendir(umu->um_node, dirrelpath, umu->um_prefix,
+                               &dir);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      for (;;)
+        {
+          ret = ops->readdir(umu->um_node, dir, &entry);
+          if (ret < 0)
+            {
+              break;
+            }
+
+          if (unionfs_hidemarker(entry.d_name))
+            {
+              mpath = unionfs_relpath(dirrelpath, entry.d_name);
+              break;
+            }
+        }
+
+      if (ops->closedir != NULL)
+        {
+          ops->closedir(umu->um_node, dir);
+        }
+
+      if (mpath == NULL)
+        {
+          return OK;                   /* 标记已清光 */
+        }
+
+      ret = unionfs_tryunlink(umu->um_node, mpath, umu->um_prefix);
+      fs_heap_free(mpath);
+
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+}
+
+/****************************************************************************
  * Name: unionfs_open
  ****************************************************************************/
 
@@ -1129,6 +1590,14 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
       FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
       struct stat st;
 
+      /* [ORT §85] 白障命名域保留（标记是私有簿记，视图不可建） */
+
+      if (unionfs_hidemarker(relpath))
+        {
+          ret = -EPERM;
+          goto errout_with_uf;
+        }
+
       ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &st);
       if (ret < 0)
         {
@@ -1137,8 +1606,11 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
             {
               if (S_ISREG(st.st_mode))
                 {
+                  /* [ORT §85] 下层同名被白障遮蔽 → 视图里"不存在"：
+                   * 不得 copy-up（否则把已删文件复活），按新建走。 */
+
                   ret = unionfs_mkparents(ui, relpath);
-                  if (ret >= 0)
+                  if (ret >= 0 && !unionfs_lowerhidden(ui, relpath))
                     {
                       ret = unionfs_copyup(ui, relpath);
                     }
@@ -1180,7 +1652,14 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
     }
   else
     {
-      /* Read-only open：上层优先（shadow），回落只读下层。 */
+      /* Read-only open：上层优先（shadow），回落只读下层 ——
+       * [ORT §85] 但白障遮蔽/标记名一律不可见。 */
+
+      if (unionfs_hidemarker(relpath))
+        {
+          ret = -ENOENT;
+          goto errout_with_uf;
+        }
 
       uf->uf_file.f_oflags = filep->f_oflags;
       uf->uf_file.f_inode  = um->um_node;
@@ -1192,6 +1671,13 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
           /* Successfully opened on file system 1 */
 
           uf->uf_ndx = 0;
+        }
+      else if (unionfs_lowerhidden(ui, relpath))
+        {
+          /* 视图里不存在（下层同名被白障遮蔽） */
+
+          ret = -ENOENT;
+          goto errout_with_uf;
         }
       else
         {
@@ -1751,6 +2237,19 @@ static int unionfs_opendir(FAR struct inode *mountpt,
 
   DEBUGASSERT(dir);
 
+  /* [ORT §85] 标记路径不可寻址；被白障遮蔽（且上层无同名）的目录在
+   * 视图里不存在。
+   */
+
+  if (unionfs_hidemarker(relpath) ||
+      (unionfs_lowerhidden(ui, relpath) &&
+       unionfs_trystatdir(ui->ui_fs[0].um_node, relpath,
+                          ui->ui_fs[0].um_prefix) < 0))
+    {
+      ret = -ENOENT;
+      goto errout_with_lock;
+    }
+
   /* Clone the path.  We will need this when we traverse file system 2 to
    * omit duplicates on file system 1.
    */
@@ -1764,11 +2263,18 @@ static int unionfs_opendir(FAR struct inode *mountpt,
         }
     }
 
-  /* Check file system 2 first. */
+  /* Check file system 2 first.  [ORT §85] opaque 目录屏蔽下层 ——
+   * 下层干脆不开（等价于下层目录为空）。
+   */
 
   um = &ui->ui_fs[1];
-  ret = unionfs_tryopendir(um->um_node, relpath, um->um_prefix,
-                           &udir->fu_lower[1]);
+  ret = -ENOENT;
+  if (!unionfs_isopaque(ui, relpath))
+    {
+      ret = unionfs_tryopendir(um->um_node, relpath, um->um_prefix,
+                               &udir->fu_lower[1]);
+    }
+
   if (ret >= 0)
     {
       /* Save the file system 2 access info */
@@ -1951,6 +2457,7 @@ static int unionfs_readdir(FAR struct inode *mountpt,
   FAR char *relpath;
   struct stat buf;
   bool duplicate;
+  bool hidden;
   int ret = -ENOSYS;
 
   /* Recover the union file system data from the struct inode instance */
@@ -2155,7 +2662,17 @@ static int unionfs_readdir(FAR struct inode *mountpt,
            */
 
           duplicate = false;
-          if (ret >= 0 && udir->fu_ndx == 1 && udir->fu_lower[0] != NULL)
+          hidden = false;
+          if (ret >= 0 && udir->fu_ndx == 0)
+            {
+              /* [ORT §85] 标记（.wh.* / .wh..wh..opq）是私有簿记，
+               * 视图不可见。
+               */
+
+              hidden = unionfs_hidemarker(entry->d_name);
+            }
+          else if (ret >= 0 && udir->fu_ndx == 1 &&
+                   udir->fu_lower[0] != NULL)
             {
               /* Get the relative path to the same file on file system 1.
                * NOTE: the on any failures we just assume that the filep
@@ -2182,13 +2699,20 @@ static int unionfs_readdir(FAR struct inode *mountpt,
                       duplicate = true;
                     }
 
+                  /* [ORT §85] 下层同名被上层白障遮蔽 → 视同重复跳过 */
+
+                  if (!duplicate && unionfs_iswhiteout(ui, relpath))
+                    {
+                      duplicate = true;
+                    }
+
                   /* Free the allocated relpath */
 
                   fs_heap_free(relpath);
                 }
             }
         }
-      while (duplicate);
+      while (duplicate || hidden);
     }
 
   return ret;
@@ -2488,6 +3012,9 @@ static int unionfs_unlink(FAR struct inode *mountpt,
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
   struct stat buf;
+  int ust;
+  int lst;
+  bool whited;
   int ret;
 
   finfo("relpath: %s\n", relpath);
@@ -2498,46 +3025,59 @@ static int unionfs_unlink(FAR struct inode *mountpt,
               relpath != NULL);
   ui = mountpt->i_private;
 
-  /* Check if some exists at this path on file system 1.  This might be
-   * a file or a directory
-   */
+  /* [ORT §85] 标记不可寻址 */
 
-  um  = &ui->ui_fs[0];
-  ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
-  if (ret >= 0)
+  if (unionfs_hidemarker(relpath))
     {
-      /* Yes.. Try to unlink the file on file system 1 (perhaps exposing
-       * a file of the same name on file system 2).  This would fail
-       * with -ENOSYS if file system 1 is a read-only only file system or
-       * -EISDIR if the path is not a file.
-       */
-
-      ret = unionfs_tryunlink(um->um_node, relpath, um->um_prefix);
+      return -ENOENT;
     }
 
-  /* There is nothing at this path on file system 1 */
+  /* 视图状态：上层有？（裸 stat）目录一律 -EISDIR（保持原语义） */
 
-  else
+  um  = &ui->ui_fs[0];
+  ust = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
+  if (ust >= 0 && S_ISDIR(buf.st_mode))
     {
-      /* [ORT §84] 仅下层存在：删除需要 whiteout（未实现）。原实现把
-       * unlink 直接打在下层 = 删镜像层。fail-closed；目标为目录时保持
-       * 原语义 -EISDIR。whiteout 留待手册 §三·补四十六 路线①。
-       */
+      return -EISDIR;
+    }
 
-      um  = &ui->ui_fs[1];
-      ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
-      if (ret >= 0)
+  um  = &ui->ui_fs[1];
+  lst = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
+  if (lst >= 0 && S_ISDIR(buf.st_mode))
+    {
+      return -EISDIR;
+    }
+
+  whited = unionfs_lowerhidden(ui, relpath);
+
+  if (ust < 0)
+    {
+      /* 上层没有：视图里"存在"仅当下层有且未被白障。 */
+
+      if (lst < 0 || whited)
         {
-          if (S_ISREG(buf.st_mode))
-            {
-              unionfs_deny_lower("unlink", relpath);
-              ret = -EROFS;
-            }
-          else
-            {
-              ret = -EISDIR;
-            }
+          return -ENOENT;
         }
+
+      /* [ORT §85] 仅下层文件：**白障即删**（原实现直接 unlink 下层
+       * = 删镜像层；§84 先行拒绝）。 */
+
+      return unionfs_mkmarker(ui, relpath, false);
+    }
+
+  /* 上层有副本：删上层；下层同名仍在且未白障 → 补白障，防"删了又
+   * 冒出来"（§65 起的已知"暴露"语义至此收口）。 */
+
+  um  = &ui->ui_fs[0];
+  ret = unionfs_tryunlink(um->um_node, relpath, um->um_prefix);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (lst >= 0 && !whited)
+    {
+      ret = unionfs_mkmarker(ui, relpath, false);
     }
 
   return ret;
@@ -2553,6 +3093,8 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
   struct stat buf;
+  int lst;
+  bool whited;
   int ret;
 
   finfo("relpath: %s\n", relpath);
@@ -2563,7 +3105,14 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
               relpath != NULL);
   ui = mountpt->i_private;
 
-  /* Is there anything with this name on either file system? */
+  /* [ORT §85] 标记命名域保留 */
+
+  if (unionfs_hidemarker(relpath))
+    {
+      return -EPERM;
+    }
+
+  /* Is there anything with this name on the upper file system? */
 
   um  = &ui->ui_fs[0];
   ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
@@ -2572,9 +3121,13 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
       return -EEXIST;
     }
 
-  um  = &ui->ui_fs[1];
-  ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
-  if (ret >= 0)
+  /* [ORT §85] 下层同名：被白障遮蔽 → 视图里不存在（重建场景），不
+   * EEXIST；未被白障 → 视图里存在，EEXIST。 */
+
+  um     = &ui->ui_fs[1];
+  lst    = unionfs_trystat(um->um_node, relpath, um->um_prefix, &buf);
+  whited = unionfs_lowerhidden(ui, relpath);
+  if (lst >= 0 && !whited)
     {
       return -EEXIST;
     }
@@ -2590,7 +3143,21 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
     }
 
   um  = &ui->ui_fs[0];
-  return unionfs_trymkdir(um->um_node, relpath, um->um_prefix, mode);
+  ret = unionfs_trymkdir(um->um_node, relpath, um->um_prefix, mode);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* [ORT §85] 重建场景（下层物理还有同名实体）：opq 标记屏蔽下层全部
+   * 子项 —— 新目录是"全新"的，旧内容不得渗出。 */
+
+  if (lst >= 0)
+    {
+      ret = unionfs_mkmarker(ui, relpath, true);
+    }
+
+  return ret;
 }
 
 /****************************************************************************
@@ -2601,8 +3168,10 @@ static int unionfs_rmdir(FAR struct inode *mountpt, FAR const char *relpath)
 {
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
-  int ret = -ENOENT;
-  int tmp;
+  int ust;
+  int lst;
+  bool whited;
+  int ret = OK;
 
   finfo("relpath: %s\n", relpath);
 
@@ -2612,32 +3181,62 @@ static int unionfs_rmdir(FAR struct inode *mountpt, FAR const char *relpath)
               relpath != NULL);
   ui = mountpt->i_private;
 
-  /* [ORT §84] 上层有 → 只删上层（下层同名暴露属已知语义，whiteout 轮
-   * 收口）；仅下层 → 拒绝（原实现会把 rmdir 打到下层 = 删镜像层）。
-   */
+  /* [ORT §85] 标记不可寻址 */
 
-  /* Is there a directory with this name on file system 1 */
-
-  um   = &ui->ui_fs[0];
-  tmp = unionfs_trystatdir(um->um_node, relpath, um->um_prefix);
-  if (tmp >= 0)
+  if (unionfs_hidemarker(relpath))
     {
-      /* Yes.. remove it.  Since we know that the directory exists, any
-       * failure to remove it is a showstopper.
-       */
-
-      return unionfs_tryrmdir(um->um_node, relpath, um->um_prefix);
+      return -ENOENT;
     }
 
-  um   = &ui->ui_fs[1];
-  tmp = unionfs_trystatdir(um->um_node, relpath, um->um_prefix);
-  if (tmp >= 0)
+  um     = &ui->ui_fs[0];
+  ust    = unionfs_trystatdir(um->um_node, relpath, um->um_prefix);
+  um     = &ui->ui_fs[1];
+  lst    = unionfs_trystatdir(um->um_node, relpath, um->um_prefix);
+  whited = unionfs_lowerhidden(ui, relpath);
+
+  /* 视图里有没有这个目录：上层有（重建场景仍算）或下层有且未白障 */
+
+  if (ust < 0 && (lst < 0 || whited))
     {
-      unionfs_deny_lower("rmdir", relpath);
-      return -EROFS;
+      return -ENOENT;
     }
 
-  return ret;
+  /* 视图非空 → -ENOTEMPTY（含"上层空、下层有内容"的合并视图；
+   * opaque 目录屏蔽下层子项） */
+
+  ret = unionfs_dirviewempty(ui, relpath);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* 上层有 → 先清标记再删上层（视图已验空 ⇒ 物理上只剩 .wh.* 标记；
+   * tmpfs 视标记为真文件，不清则 EBUSY） */
+
+  if (ust >= 0)
+    {
+      ret = unionfs_clearmarkers(ui, relpath);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      um  = &ui->ui_fs[0];
+      ret = unionfs_tryrmdir(um->um_node, relpath, um->um_prefix);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  /* [ORT §85] 下层同名仍在且未白障 → 白障（防"删了又冒出来"） */
+
+  if (lst >= 0 && !whited)
+    {
+      ret = unionfs_mkmarker(ui, relpath, false);
+    }
+
+  return (ret >= 0) ? OK : ret;
 }
 
 /****************************************************************************
@@ -2650,8 +3249,10 @@ static int unionfs_rename(FAR struct inode *mountpt,
 {
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
+  int ust;
+  int lst;
+  bool whited;
   int ret = -ENOENT;
-  int tmp;
 
   finfo("oldrelpath: %s newrelpath: %s\n", oldrelpath, newrelpath);
 
@@ -2662,41 +3263,71 @@ static int unionfs_rename(FAR struct inode *mountpt,
 
   DEBUGASSERT(oldrelpath != NULL && oldrelpath != NULL);
 
-  /* Is there a file with this name on file system 1 */
+  /* [ORT §85] 标记不可寻址 / 新名不得落进标记命名域 */
 
-  um   = &ui->ui_fs[0];
-  tmp = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
-  if (tmp >= 0)
+  if (unionfs_hidemarker(oldrelpath))
     {
-      /* Yes.. rename it.  Since we know that the directory exists, any
-       * failure to remove it is a showstopper.
-       */
+      return -ENOENT;
+    }
 
-      ret = unionfs_tryrename(um->um_node, oldrelpath, newrelpath,
-                              um->um_prefix);
+  if (unionfs_hidemarker(newrelpath))
+    {
+      return -EPERM;
+    }
+
+  /* 视图状态：上层有源？（裸 statfile）下层有源？白障？ */
+
+  um     = &ui->ui_fs[0];
+  ust    = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
+  um     = &ui->ui_fs[1];
+  lst    = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
+  whited = unionfs_lowerhidden(ui, oldrelpath);
+
+  if (ust < 0)
+    {
+      /* 视图里没有源 */
+
+      if (lst < 0 || whited)
+        {
+          return -ENOENT;
+        }
+
+      /* [ORT §85] 源仅下层：copy-up 到旧名 → 上层改名 → 白障旧名
+       * （原实现把 rename 直接打在下层 = 改镜像层）。 */
+
+      ret = unionfs_mkparents(ui, oldrelpath);
       if (ret >= 0)
         {
-          /* Return immediately on success.  In the event that the file
-           * exists in both file systems, this will produce the odd behavior
-           * that one file on file system 1 was renamed but another obscured
-           * file of the same relative path will become visible.
-           */
+          ret = unionfs_copyup(ui, oldrelpath);
+        }
 
-          return OK;
+      if (ret < 0)
+        {
+          return ret;
         }
     }
 
-  /* [ORT §84] 源仅在下层：rename 需要 copy-up + whiteout 组合（未
-   * 实现），原实现把 rename 直接打在下层 = 改镜像层。fail-closed，
-   * 留待 §三·补四十六 路线①。
-   */
+  /* 新名的父目录先上移（新名可能落进仅下层有的目录） */
 
-  um   = &ui->ui_fs[1];
-  tmp = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
-  if (tmp >= 0)
+  ret = unionfs_mkparents(ui, newrelpath);
+  if (ret < 0)
     {
-      unionfs_deny_lower("rename", oldrelpath);
-      ret = -EROFS;
+      return ret;
+    }
+
+  um  = &ui->ui_fs[0];
+  ret = unionfs_tryrename(um->um_node, oldrelpath, newrelpath,
+                          um->um_prefix);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* 旧名下层同名仍在且未白障 → 补白障（否则改名后旧名"复活"）。 */
+
+  if (lst >= 0 && !whited)
+    {
+      ret = unionfs_mkmarker(ui, oldrelpath, false);
     }
 
   return ret;
@@ -2721,6 +3352,13 @@ static int unionfs_stat(FAR struct inode *mountpt, FAR const char *relpath,
               relpath != NULL);
   ui = mountpt->i_private;
 
+  /* [ORT §85] 标记路径视图不可见 */
+
+  if (unionfs_hidemarker(relpath))
+    {
+      return -ENOENT;
+    }
+
   /* stat this path on file system 1 */
 
   um  = &ui->ui_fs[0];
@@ -2734,7 +3372,14 @@ static int unionfs_stat(FAR struct inode *mountpt, FAR const char *relpath,
       return OK;
     }
 
-  /* stat failed on the file system 1.  Try again on file system 2. */
+  /* stat failed on the file system 1.  [ORT §85] 被白障遮蔽 → ENOENT。 */
+
+  if (unionfs_lowerhidden(ui, relpath))
+    {
+      return -ENOENT;
+    }
+
+  /* Try again on file system 2. */
 
   um  = &ui->ui_fs[1];
   ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, buf);
@@ -2798,6 +3443,13 @@ static int unionfs_chstat(FAR struct inode *mountpt, FAR const char *relpath,
               relpath != NULL);
   ui = mountpt->i_private;
 
+  /* [ORT §85] 标记不可寻址 */
+
+  if (unionfs_hidemarker(relpath))
+    {
+      return -ENOENT;
+    }
+
   /* chstat this path on file system 1 */
 
   um  = &ui->ui_fs[0];
@@ -2811,22 +3463,41 @@ static int unionfs_chstat(FAR struct inode *mountpt, FAR const char *relpath,
       return OK;
     }
 
-  /* [ORT §84] chstat 只许落上层；打到下层 = 改镜像层元数据。仅下层
-   * 存在时 fail-closed（正解是 copy-up 后改上层，留待 §三·补四十六
-   * 路线①）。路径两处都不存在时保持 -ENOENT。
+  /* [ORT §85] 仅下层存在：copy-up 后改**上层副本**（§84 先行拒绝；
+   * 直改下层 = 改镜像层元数据）。视图里不存在（白障/两处皆无）→
+   * -ENOENT。
    */
 
-  um  = &ui->ui_fs[1];
   {
     struct stat stbuf;
 
+    um  = &ui->ui_fs[1];
     ret = unionfs_trystat(um->um_node, relpath, um->um_prefix, &stbuf);
-    if (ret >= 0)
-      {
-        unionfs_deny_lower("chstat", relpath);
-        return -EROFS;
-      }
   }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (unionfs_lowerhidden(ui, relpath))
+    {
+      return -ENOENT;
+    }
+
+  ret = unionfs_mkparents(ui, relpath);
+  if (ret >= 0)
+    {
+      ret = unionfs_copyup(ui, relpath);
+    }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  um  = &ui->ui_fs[0];
+  ret = unionfs_trychstat(um->um_node, relpath, um->um_prefix, buf, flags);
 
   return ret;
 }
