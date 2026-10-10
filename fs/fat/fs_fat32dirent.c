@@ -55,6 +55,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/debug.h>
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -1163,9 +1164,25 @@ static int fat_path2dirname(FAR const char **path,
           /* Get short file name for given path */
 
           char name[DIR_MAXFNAME];
+          FAR const char *tmp;
+
           memcpy(name, dirinfo->fd_lfname, DIR_MAXFNAME);
-          FAR const char *tmp = (FAR const char *)name;
-          fat_parsesfname(&tmp, dirinfo, NULL);
+          tmp = (FAR const char *)name;
+
+          /* [ORT §97] 短名回退**失败即回退长名表示**：本配置
+           * （CONFIG_FAT_LFN && !CONFIG_FAT_LCNAMES）下含小写字符的
+           * 名字按设计被 fat_parsesfname 拒（-EINVAL，"须走长名"）——
+           * 上游提交漏了这条：失败后 fd_name 停在**全空格**的半填态，
+           * 下游按失序表示建条目（实测：写出 11 空格的无名条目，
+           * 文件/目录后续 EEXIST/ENOTDIR 连环坏事）。清掉半填的
+           * fd_name，让下游用 fd_lfname（长名 + alias 由 createalias
+           * 从长名重生成）表示 —— 大写且装得下的名字不受影响
+           * （parsesfname 成功，维持短名表示）。 */
+
+          if (fat_parsesfname(&tmp, dirinfo, NULL) < 0)
+            {
+              dirinfo->fd_name[0] = '\0';
+            }
         }
     }
 
