@@ -24,6 +24,7 @@
  * Included Files
  ****************************************************************************/
 
+#include <nuttx/debug.h>
 #include <nuttx/streams.h>
 
 /****************************************************************************
@@ -116,6 +117,16 @@ int nx_vasprintf(FAR char **ptr, FAR const IPTR char *fmt, va_list ap)
    * method has already added the NUL terminator to the end of the string
    * (not included in the nput count).
    */
+
+  /* [ORT §96/§98 永久诊断] 该断言曾两度现身（任务 orting / /bin/orthello，
+   * 用户固定 pc，未定根因，滚动观察在案）——触发前把 fmt 与两趟长度打
+   * 出来，下次再现即可一发定位调用者。通过路径零成本、零输出。 */
+
+  if (!(nbytes < 0 || nbytes == nulloutstream.nput))
+    {
+      _err("ORTVDBG vasprintf mismatch fmt=[%s] nbytes=%d nput=%d\n",
+           fmt, nbytes, nulloutstream.nput);
+    }
 
   DEBUGASSERT(nbytes < 0 || nbytes == nulloutstream.nput);
 

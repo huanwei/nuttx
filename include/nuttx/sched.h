@@ -545,6 +545,10 @@ struct task_group_s
   bool    tg_ort_re_root;           /* [§86] 本组是否执行重挂。只由 binfmt
                                      *   派生传播置位 —— 设根者自己**不**重挂
                                      *   （监督者还要访问全局路径）。 */
+  uint32_t tg_ort_lpid;             /* [§98] pid 视图：本组在**容器 pid
+                                     *   命名空间**（= 同 root 的全部组）
+                                     *   里的本地号（1 起）。0 = 未入
+                                     *   命名空间（全局 pid 语义）。 */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD

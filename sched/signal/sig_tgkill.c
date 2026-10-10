@@ -69,6 +69,14 @@
 
 int nxsig_tgkill(pid_t pid, pid_t tid, int signo)
 {
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §98] pid 视图：两参都本地号优先（容器单任务场景 pid==tid；
+   * 多线程容器的线程号面仍全局——第一刀边界） */
+
+  pid = ort_pid_resolve(pid);
+  tid = ort_pid_resolve(tid);
+#endif
+
   /* If group members are supported then tgkill() differs from kill().
    * kill(), in this case, must follow the POSIX rules for delivery of
    * signals in the group environment.  Otherwise, kill(), like tgkill()

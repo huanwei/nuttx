@@ -211,6 +211,7 @@ static int nxtask_restart(pid_t pid)
   /* [ORT §96③] pid 面闸（同 setparam；见其注释）：容器不得重启
    * 自家组之外的任何任务 */
 
+  pid = ort_pid_resolve(pid);   /* [§98] 本地号优先 */
   ret = ort_sig_gate(pid);
   if (ret < 0)
     {

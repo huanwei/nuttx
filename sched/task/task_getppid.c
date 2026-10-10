@@ -24,6 +24,7 @@
  * Included Files
  ****************************************************************************/
 
+#include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <sched.h>
@@ -86,6 +87,30 @@ pid_t nxsched_getppid(void)
           /* Yes.. Return the parent task ID from the TCB at the head of the
            * ready-to-run task list
            */
+
+#ifdef CONFIG_ORT_CONTAINER
+          /* [ORT §98] pid 视图：容器成员的 getppid 按**命名空间**口径
+           * —— 父组同命名空间（同 root）⇒ 父组本地号；否则 0
+           * （照 POSIX：命名空间外的父 = 0）。 */
+
+          if (rtcb->group != NULL && rtcb->group->tg_ort_lpid != 0)
+            {
+              FAR struct tcb_s *ptcb =
+                nxsched_get_tcb(rtcb->group->tg_ppid);
+
+              if (ptcb != NULL && ptcb->group != NULL &&
+                  ptcb->group->tg_ort_root != NULL &&
+                  rtcb->group->tg_ort_root != NULL &&
+                  strncmp(ptcb->group->tg_ort_root,
+                          rtcb->group->tg_ort_root, 64) == 0 &&
+                  ptcb->group->tg_ort_lpid != 0)
+                {
+                  return (pid_t)ptcb->group->tg_ort_lpid;
+                }
+
+              return 0;
+            }
+#endif
 
           return rtcb->group->tg_ppid;
         }

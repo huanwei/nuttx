@@ -45,6 +45,7 @@
 #include "signal/signal.h"
 #include "pthread/pthread.h"
 #include "mqueue/mqueue.h"
+#include "sched/sched.h"
 #include "group/group.h"
 #include "tls/tls.h"
 
@@ -277,6 +278,7 @@ void group_drop(FAR struct task_group_s *group)
 
       if (group->tg_ort_root != NULL)
         {
+          ort_pidns_put(group->tg_ort_root);   /* [§98] 先退命名空间 */
           kmm_free(group->tg_ort_root);
           group->tg_ort_root = NULL;
         }

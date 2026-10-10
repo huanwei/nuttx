@@ -111,6 +111,13 @@ static int nxsig_queue_common(int pid, int signo, union sigval value)
 
 int nxsig_queue(int pid, int signo, union sigval value)
 {
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §98] pid 视图：本地号优先解析（命中本命名空间成员换全局号走
+   * 原路；未命中按原全局走原闸——跨组 EPERM 不变） */
+
+  pid = ort_pid_resolve(pid);
+#endif
+
   /* [ORT §87] 跨组投递闸 —— 用户侧 sigqueue/kill 族走这里或 kill/tgkill
    * 同款闸；内核子系统对被监督对象的通知走 nxsig_queue_kernel（不过
    * 闸，见其说明）。 */

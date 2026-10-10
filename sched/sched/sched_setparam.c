@@ -189,6 +189,8 @@ int nxsched_set_param(pid_t pid, FAR const struct sched_param *param)
    * 只准改**自家组**任务的调度参数 —— 否则容器可把监督者/init/别家
    * 容器降级饿死（跨组 → -EPERM；不存在 → -ESRCH，与后续查找同码）。 */
 
+  pid = ort_pid_resolve(pid);   /* [§98] 本地号优先 */
+
   if (pid != 0)
     {
       ret = ort_sig_gate(pid);

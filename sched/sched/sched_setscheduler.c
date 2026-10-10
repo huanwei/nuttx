@@ -176,6 +176,8 @@ int nxsched_set_scheduler(pid_t pid, int policy,
 #ifdef CONFIG_ORT_CONTAINER
   /* [ORT §96③] pid 面闸（同 setparam；见其注释） */
 
+  pid = ort_pid_resolve(pid);   /* [§98] 本地号优先 */
+
   if (pid != 0)
     {
       ret = ort_sig_gate(pid);

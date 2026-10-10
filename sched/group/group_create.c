@@ -263,5 +263,11 @@ void group_initialize(FAR struct tcb_s *tcb)
       group->tg_pid = tcb->pid;
     }
 
-  group->tg_info->ta_pid = group->tg_pid;
+  /* [ORT §98] pid 视图（自省面第一刀）：容器组把用户可见的 ta_pid
+   * 写成**本地号**（getpid 的用户实现读这里）。本函数是组初始化的
+   * **收尾权威点**（nxtask_init 的早期改写会被这里覆盖——§98 踩过：
+   * 探针读到 kernel 写 1、用户却读到全局号，罪魁就是本行）。 */
+
+  group->tg_info->ta_pid = (pid_t)(group->tg_ort_lpid != 0 ?
+                                   group->tg_ort_lpid : group->tg_pid);
 }

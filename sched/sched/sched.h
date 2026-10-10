@@ -607,4 +607,16 @@ static inline_function int nxsched_select_cpu(cpu_set_t affinity)
   return cpu;
 }
 #  endif
+#ifdef CONFIG_ORT_CONTAINER
+/* [ORT §98] 容器 pid 命名空间（自省面第一刀，见 sched/task/ort_pidns.c） */
+uint32_t ort_pidns_join(FAR const char *root);
+void     ort_pidns_put(FAR const char *root);
+pid_t    ort_pid_resolve(pid_t pid);
+
+/* [ORT §54 欠账，§98 清] 架构侧实现（arch/arm/src/common/arm_ortcommon.h
+ * 为准）；本处补声明消 task_prctl.c 的**隐式声明**（编译警告早就在，
+ * 此前该 TU 未重编所以没露头——§94"警告必须看"同族）。 */
+int      ort_domain_capacity(void);
+#endif
+
 #endif /* __SCHED_SCHED_SCHED_H */

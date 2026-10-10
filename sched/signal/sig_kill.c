@@ -77,6 +77,13 @@
 
 int nxsig_kill(pid_t pid, int signo)
 {
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §98] pid 视图：本地号优先解析（命中本命名空间成员换全局号走
+   * 原路；未命中按原全局走原闸——跨组 EPERM 不变） */
+
+  pid = ort_pid_resolve(pid);
+#endif
+
 #if !defined(CONFIG_DISABLE_ALL_SIGNALS) && defined(CONFIG_SCHED_HAVE_PARENT)
   FAR struct tcb_s *rtcb = this_task();
 #endif

@@ -37,6 +37,7 @@
 #include <nuttx/sched.h>
 #include <nuttx/trace.h>
 
+#include <nuttx/debug.h>
 #include "sched/sched.h"
 #include "environ/environ.h"
 #include "group/group.h"
@@ -148,6 +149,14 @@ int nxtask_init(FAR struct tcb_s *tcb, const char *name, int priority,
 
       tcb->group->tg_ort_root    = root;
       tcb->group->tg_ort_re_root = true;
+
+      /* [ORT §98] 容器 pid 命名空间（自省面第一刀）：本组取本地号；
+       * 用户态 getpid 读 tg_info->ta_pid（组创建时填的全局号）——
+       * 这里**改写为本地号**。表满（join 返回 0）按全局语义降级。 */
+
+      tcb->group->tg_ort_lpid = ort_pidns_join(root);
+      /* ta_pid 的落点在 group_initialize（收尾权威点）——见其注释 */
+
     }
 #endif
 

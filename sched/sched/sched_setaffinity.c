@@ -84,6 +84,8 @@ int nxsched_set_affinity(pid_t pid, size_t cpusetsize,
    * 核集 —— 否则可把监督者/别家容器钉到单核饿死（§80 的施加面正是
    * 这条 syscall）。 */
 
+  pid = ort_pid_resolve(pid);   /* [§98] 本地号优先 */
+
   if (pid != 0)
     {
       ret = ort_sig_gate(pid);

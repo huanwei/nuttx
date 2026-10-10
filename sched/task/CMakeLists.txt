@@ -32,6 +32,7 @@ set(SRCS
     task_exithook.c
     task_getgroup.c
     task_getpid.c
+    ort_pidns.c
     task_prctl.c
     task_recover.c
     task_restart.c
