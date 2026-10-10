@@ -207,6 +207,17 @@ static int nxtask_restart(pid_t pid)
       goto errout_with_lock;
     }
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §96③] pid 面闸（同 setparam；见其注释）：容器不得重启
+   * 自家组之外的任何任务 */
+
+  ret = ort_sig_gate(pid);
+  if (ret < 0)
+    {
+      goto errout_with_lock;
+    }
+#endif
+
   /* Find for the TCB associated with matching pid  */
 
   tcb = nxsched_get_tcb(pid);

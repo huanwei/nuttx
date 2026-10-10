@@ -211,6 +211,9 @@ static int     unionfs_stat(FAR struct inode *mountpt,
 static int     unionfs_readlink(FAR struct inode *mountpt,
                                 FAR const char *relpath,
                                 FAR char *buf, size_t bufsize);
+static int     unionfs_resolve(FAR struct inode *mountpt,
+                               FAR const char *relpath, bool nofollow,
+                               FAR char *buf, size_t bufsize);
 static int     unionfs_chstat(FAR struct inode *mountpt,
                               FAR const char *relpath,
                               FAR const struct stat *buf, int flags);
@@ -270,8 +273,9 @@ const struct mountpt_operations g_unionfs_operations =
   unionfs_chstat,      /* chstat */
   NULL,                /* syncfs（未用，保持位置） */
   unionfs_readlink,    /* readlink  [ORT §95] */
-  NULL                 /* symlink   [ORT §95]：经视图**创建**链接不做
+  NULL,                /* symlink   [ORT §95]：经视图**创建**链接不做
                         * （写入面属 upper 层语义，未做前 fail-closed） */
+  unionfs_resolve      /* resolve   [ORT §96①] */
 };
 
 /****************************************************************************
@@ -3533,6 +3537,299 @@ static int unionfs_readlink(FAR struct inode *mountpt,
     }
 
   return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_normpath
+ *
+ * Description:
+ *   [ORT §96①] 与 tmpfs_normpath 同款的文本规范化（两处各留一份，
+ *   见 fs_tmpfs.c 的注释；跨 FS 共享不值得为 30 行引头文件）。
+ *
+ ****************************************************************************/
+
+static void unionfs_normpath(FAR char *path, bool isabs)
+{
+  FAR char *w = path + (isabs ? 1 : 0);
+  FAR char *r = w;
+  FAR char *base = path + (isabs ? 1 : 0);
+
+  while (*r != '\0')
+    {
+      if (*r == '/')
+        {
+          r++;
+          continue;
+        }
+
+      if (r[0] == '.' && (r[1] == '/' || r[1] == '\0'))
+        {
+          r += (r[1] == '/') ? 2 : 1;
+          continue;
+        }
+
+      if (r[0] == '.' && r[1] == '.' &&
+          (r[2] == '/' || r[2] == '\0'))
+        {
+          r += (r[2] == '/') ? 3 : 2;
+
+          if (w > base)
+            {
+              w--;
+              while (w > base && w[-1] != '/')
+                {
+                  w--;
+                }
+
+              if (w > base)
+                {
+                  w--;
+                }
+            }
+
+          continue;
+        }
+
+      if (w != base)
+        {
+          *w++ = '/';
+        }
+
+      while (*r != '\0' && *r != '/')
+        {
+          *w++ = *r++;
+        }
+    }
+
+  *w = '\0';
+}
+
+/****************************************************************************
+ * Name: unionfs_resolve
+ *
+ * Description:
+ *   [ORT §96①] 链接跟随（解析）：把 relpath 里的符号链接展开，交
+ *   VFS 重驱动。逐组件判**可见节点**（上层命中→上层；否则下层；
+ *   白障/标记遮蔽），命中链接就把目标拼进路径继续走。相对目标按
+ *   链接所在目录拼、".." 夹在挂载根上；绝对目标原样交出（跨挂载与
+ *   容器语义由 VFS 咽喉统一处理）。
+ *
+ *   静态缓冲：调用方（inode_search）持 g_inode_sem 全局串行。
+ *
+ ****************************************************************************/
+
+#define UNIONFS_RESOLVE_MAX 300
+
+static int unionfs_resolve(FAR struct inode *mountpt, FAR const char *relpath,
+                           bool nofollow, FAR char *buf, size_t bufsize)
+{
+  static char work[UNIONFS_RESOLVE_MAX];
+  static char next[UNIONFS_RESOLVE_MAX];
+  static char cur[UNIONFS_RESOLVE_MAX];
+  static char comp[UNIONFS_RESOLVE_MAX];
+  static char sub[UNIONFS_RESOLVE_MAX];
+  static char tbuf[UNIONFS_RESOLVE_MAX];
+  FAR struct unionfs_inode_s *ui;
+  FAR struct unionfs_mountpt_s *um;
+  struct stat stbuf;
+  bool spliced = false;
+  bool isabs;
+  int  loops;
+
+  DEBUGASSERT(mountpt != NULL && relpath != NULL && buf != NULL);
+
+  ui = mountpt->i_private;
+  DEBUGASSERT(ui != NULL);
+
+  if (strlen(relpath) >= sizeof(work))
+    {
+      return -ENAMETOOLONG;
+    }
+
+  strlcpy(work, relpath, sizeof(work));
+  isabs = (work[0] == '/');
+  unionfs_normpath(work, isabs);
+
+  for (loops = 0; loops <= SYMLOOP_MAX; loops++)
+    {
+      FAR const char *p = work + (isabs ? 1 : 0);
+      bool restarted = false;
+
+      cur[0] = '\0';
+
+      while (*p != '\0')
+        {
+          size_t l = 0;
+          int  found;
+          bool islink;
+
+          while (*p == '/')
+            {
+              p++;
+            }
+
+          if (*p == '\0')
+            {
+              break;
+            }
+
+          while (*p != '\0' && *p != '/')
+            {
+              if (l + 1 < sizeof(comp))
+                {
+                  comp[l++] = *p;
+                }
+
+              p++;
+            }
+
+          comp[l] = '\0';
+
+          if (cur[0] != '\0')
+            {
+              if (snprintf(sub, sizeof(sub), "%s/%s", cur, comp) >=
+                  (int)sizeof(sub))
+                {
+                  return -ENAMETOOLONG;
+                }
+            }
+          else
+            {
+              strlcpy(sub, comp, sizeof(sub));
+            }
+
+          /* 判可见节点：存在？是链接？ */
+
+          found  = 0;
+          islink = 0;
+
+          if (unionfs_hidemarker(sub))
+            {
+              found = 0;
+            }
+          else
+            {
+              um = &ui->ui_fs[0];
+
+              if (unionfs_trystat(um->um_node, sub, um->um_prefix,
+                                  &stbuf) >= 0)
+                {
+                  found = 1;
+                  tbuf[0] = '\0';
+                  if (unionfs_tryreadlink(um->um_node, sub, um->um_prefix,
+                                          tbuf, sizeof(tbuf)) >= 0)
+                    {
+                      islink = 1;
+                    }
+                }
+              else if (!unionfs_lowerhidden(ui, sub))
+                {
+                  um = &ui->ui_fs[1];
+
+                  if (unionfs_trystat(um->um_node, sub, um->um_prefix,
+                                      &stbuf) >= 0)
+                    {
+                      found = 1;
+                      tbuf[0] = '\0';
+                      if (unionfs_tryreadlink(um->um_node, sub,
+                                              um->um_prefix,
+                                              tbuf, sizeof(tbuf)) >= 0)
+                        {
+                          islink = 1;
+                        }
+                    }
+                }
+            }
+
+          if (!found)
+            {
+              if (!spliced)
+                {
+                  return 0;
+                }
+
+              strlcpy(buf, work, bufsize);
+              return 1;
+            }
+
+          if (!islink)
+            {
+              strlcpy(cur, sub, sizeof(cur));
+              continue;
+            }
+
+          /* 是链接：终端链接在 nofollow 下不展开 */
+
+          if (*p == '\0' && nofollow)
+            {
+              if (!spliced)
+                {
+                  return 0;
+                }
+
+              if (cur[0] != '\0')
+                {
+                  snprintf(buf, bufsize, "%s%s/%s",
+                           isabs ? "/" : "", cur, comp);
+                }
+              else
+                {
+                  snprintf(buf, bufsize, "%s%s", isabs ? "/" : "", comp);
+                }
+
+              return 1;
+            }
+
+          {
+            FAR const char *rest = p;
+
+            while (*rest == '/')
+              {
+                rest++;
+              }
+
+            int n;
+
+            if (tbuf[0] == '/')
+              {
+                n = snprintf(next, sizeof(next), "%s%s%s", tbuf,
+                             *rest != '\0' ? "/" : "", rest);
+                isabs = true;
+              }
+            else
+              {
+                n = snprintf(next, sizeof(next), "%s%s%s%s%s",
+                             cur, cur[0] != '\0' ? "/" : "", tbuf,
+                             *rest != '\0' ? "/" : "", rest);
+                isabs = false;
+              }
+
+            if (n < 0 || n >= (int)sizeof(next))
+              {
+                return -ENAMETOOLONG;
+              }
+          }
+
+          strlcpy(work, next, sizeof(work));
+          unionfs_normpath(work, isabs);
+          spliced   = true;
+          restarted = true;
+          break;
+        }
+
+      if (!restarted)
+        {
+          if (!spliced)
+            {
+              return 0;
+            }
+
+          strlcpy(buf, work, bufsize);
+          return 1;
+        }
+    }
+
+  return -ELOOP;
 }
 
 /****************************************************************************

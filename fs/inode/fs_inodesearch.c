@@ -569,54 +569,128 @@ int inode_search(FAR struct inode_search_s *desc)
       fromcwd    = true;
     }
 
-#ifdef CONFIG_ORT_CONTAINER
-  /* [ORT §86] 容器 root（chroot 族）：绝对路径重挂到本组的根 ——
-   * 这是**唯一咽喉**：VFS 所有按路径的进入点最终都走到这里；软链接
-   * 跟随（_inode_linktarget）也共用同一实现（§95 收口）。语义详见
-   * _ort_reroot() 的注释。
+  /* [ORT §96①] 主循环：咽喉重挂 + 链接跟随**重驱动**。
+   *
+   * 流程：重挂（容器）→ _inode_search → 伪 FS 软链接终端跟随 → 若停在
+   * 挂载点且 relpath 非空，问该 FS 的 resolve op：路径里有没有符号
+   * 链接要展开？有就换路径从**咽喉**重新走（跨挂载/容器语义都在咽喉
+   * 统一处理），直到 FS 报"没有链接"（0）或出错；链长以 SYMLOOP 为界
+   * （-ELOOP）。
+   *
+   * 重驱动的两种形态：
+   *   · 替换路径 `/` 开头（目标是绝对）⇒ 按容器根重挂（chroot 语义，
+   *     与伪 FS 软链接跟随的 _ort_reroot(desc, false) 一致）；
+   *   · 挂载内相对（相对目标拼接后仍在本挂载）⇒ 与挂载点全局路径拼
+   *     接，**不再重挂**（拼出来已是全局视图路径）。
+   *
+   * 静态缓冲：本函数持 g_inode_sem 全局串行（既有假设），resolve 实现
+   * 也不回调 VFS —— 静态安全。
    */
 
-  ret = _ort_reroot(desc, fromcwd);
-  if (ret < 0)
-    {
-      return ret;
-    }
+  {
+    static char rbuf[300];
+    static char mpath[300];
+    int  loops;
+    bool reroot = true;
+
+    for (loops = 0; ; loops++)
+      {
+        if (loops > SYMLOOP_MAX)
+          {
+            ret = -ELOOP;
+            break;
+          }
+
+#ifdef CONFIG_ORT_CONTAINER
+        if (reroot)
+          {
+            ret = _ort_reroot(desc, loops == 0 ? fromcwd : false);
+            if (ret < 0)
+              {
+                return ret;
+              }
+          }
 #endif
 
-  ret = _inode_search(desc);
+        ret = _inode_search(desc);
+        if (ret < 0)
+          {
+            break;
+          }
 
 #ifdef CONFIG_PSEUDOFS_SOFTLINKS
-  if (ret >= 0)
-    {
-      FAR struct inode *inode;
+        /* 终端的伪 FS 软链接：跟随（原逻辑；自带 SYMLOOP 界） */
 
-      /* Search completed successfully */
-
-      inode = desc->node;
-      DEBUGASSERT(inode != NULL);
-
-      /* Is the terminal node a softlink? Should we follow it? */
-
-      if (!desc->nofollow && INODE_IS_SOFTLINK(inode))
-        {
-          /* The terminating inode is a valid soft link:  Return the inode,
-           * corresponding to link target.  _inode_linktarget() will follow
-           * a link (or a series of links to links) and will return the
-           * link target of the final symbolic link in the series.
-           */
-
-          ret = _inode_linktarget(inode, desc);
-          if (ret < 0)
-            {
-              /* The most likely cause for failure is that the target of the
-               * symbolic link does not exist.
-               */
-
-              return ret;
-            }
-        }
-    }
+        if (!desc->nofollow && INODE_IS_SOFTLINK(desc->node))
+          {
+            ret = _inode_linktarget(desc->node, desc);
+            if (ret < 0)
+              {
+                break;
+              }
+          }
 #endif
+
+        /* 停在挂载点、卷内有剩余路径：问 FS 要不要展开链接 */
+
+        if (!INODE_IS_MOUNTPT(desc->node) ||
+            desc->node->u.i_mops == NULL ||
+            desc->node->u.i_mops->resolve == NULL ||
+            desc->relpath == NULL || desc->relpath[0] == '\0')
+          {
+            break;
+          }
+
+        ret = desc->node->u.i_mops->resolve(desc->node, desc->relpath,
+                                            desc->nofollow, rbuf,
+                                            sizeof(rbuf));
+        if (ret <= 0)
+          {
+            break;                     /* 0 = 无链接；负 = 错误 */
+          }
+
+        /* ret == 1：替换路径重驱动 */
+
+        {
+          FAR char *np;
+
+          if (rbuf[0] == '/')
+            {
+              np = fs_heap_strdup(rbuf);
+              reroot = true;
+            }
+          else
+            {
+              if (inode_getpath(desc->node, mpath, sizeof(mpath)) < 0)
+                {
+                  ret = -ENAMETOOLONG;
+                  break;
+                }
+
+              if (fs_heap_asprintf(&np, "%s/%s", mpath, rbuf) < 0)
+                {
+                  np = NULL;
+                }
+
+              reroot = false;
+            }
+
+          if (np == NULL)
+            {
+              ret = -ENOMEM;
+              break;
+            }
+
+          if (desc->buffer != NULL)
+            {
+              fs_heap_free(desc->buffer);
+            }
+
+          desc->buffer = np;
+          desc->path   = np;
+        }
+      }
+  }
 
   return ret;
 }

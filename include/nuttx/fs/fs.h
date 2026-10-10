@@ -373,6 +373,19 @@ struct mountpt_operations
                            FAR char *buf, size_t bufsize);
   CODE int     (*symlink)(FAR struct inode *mountpt, FAR const char *relpath,
                           FAR const char *target);
+
+  /* [ORT §96①] 链接跟随（解析）：把 relpath 里遇到的符号链接展开，
+   * 返回**替换路径**供 VFS 从头重驱动（跨挂载语义归 VFS）。
+   *   0  = 路径里没有链接（原 relpath 有效，调用方照常继续）；
+   *   1  = buf 里是替换路径：`/` 开头 = 绝对（VFS 按容器重挂重驱动）；
+   *        否则 = **挂载内相对**（VFS 与挂载点路径拼接后重驱动）；
+   *   负 = 错误（-ELOOP 链太长等）。
+   * nofollow：终端的链接**不展开**（readlink/lstat 语义）；路径中间
+   * 的链接总是展开。目标为相对时按链接所在目录拼接；".." 越过挂载
+   * 根一律**夹在根上**（相对链接不能借 ".." 逃出本挂载）。 */
+
+  CODE int     (*resolve)(FAR struct inode *mountpt, FAR const char *relpath,
+                          bool nofollow, FAR char *buf, size_t bufsize);
 };
 #endif /* CONFIG_DISABLE_MOUNTPOINT */
 

@@ -38,6 +38,7 @@
 
 #include "sched/sched.h"
 #include "clock/clock.h"
+#include "signal/signal.h"
 
 /****************************************************************************
  * Private Functions
@@ -171,6 +172,19 @@ int nxsched_set_scheduler(pid_t pid, int policy,
   FAR struct tcb_s *tcb;
   irqstate_t flags;
   int ret = -EINVAL;
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §96③] pid 面闸（同 setparam；见其注释） */
+
+  if (pid != 0)
+    {
+      ret = ort_sig_gate(pid);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+#endif
 
   /* Check if the task to modify the calling task */
 

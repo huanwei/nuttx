@@ -37,6 +37,7 @@
 
 #include "clock/clock.h"
 #include "sched/sched.h"
+#include "signal/signal.h"
 
 /****************************************************************************
  * Private Functions
@@ -182,6 +183,21 @@ int nxsched_set_param(pid_t pid, FAR const struct sched_param *param)
   FAR struct tcb_s *rtcb;
   FAR struct tcb_s *tcb;
   int ret = OK;
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §96③] pid 面闸（与信号闸同款谓词：容器=设根或绑域）：容器
+   * 只准改**自家组**任务的调度参数 —— 否则容器可把监督者/init/别家
+   * 容器降级饿死（跨组 → -EPERM；不存在 → -ESRCH，与后续查找同码）。 */
+
+  if (pid != 0)
+    {
+      ret = ort_sig_gate(pid);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+#endif
 
   /* Verify that the requested priority is in the valid range */
 

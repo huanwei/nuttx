@@ -34,6 +34,7 @@
 #include <nuttx/arch.h>
 
 #include "sched/sched.h"
+#include "signal/signal.h"
 
 /****************************************************************************
  * Public Functions
@@ -77,6 +78,21 @@ int nxsched_set_affinity(pid_t pid, size_t cpusetsize,
   FAR struct tcb_s *tcb;
   irqstate_t flags;
   int ret = OK;
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §96③] pid 面闸（同 setparam；见其注释）：容器改不了别组的
+   * 核集 —— 否则可把监督者/别家容器钉到单核饿死（§80 的施加面正是
+   * 这条 syscall）。 */
+
+  if (pid != 0)
+    {
+      ret = ort_sig_gate(pid);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+#endif
 
   DEBUGASSERT(cpusetsize == sizeof(cpu_set_t) && mask != NULL);
 

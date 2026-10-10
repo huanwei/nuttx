@@ -182,6 +182,9 @@ static int  tmpfs_readlink(FAR struct inode *mountpt,
               FAR const char *relpath, FAR char *buf, size_t bufsize);
 static int  tmpfs_symlink(FAR struct inode *mountpt,
               FAR const char *relpath, FAR const char *target);
+static int  tmpfs_resolve(FAR struct inode *mountpt,
+              FAR const char *relpath, bool nofollow,
+              FAR char *buf, size_t bufsize);
 static int  tmpfs_stat(FAR struct inode *mountpt, FAR const char *relpath,
               FAR struct stat *buf);
 
@@ -225,7 +228,8 @@ const struct mountpt_operations g_tmpfs_operations =
   NULL,             /* chstat */
   NULL,             /* syncfs */
   tmpfs_readlink,   /* readlink  [ORT §95] */
-  tmpfs_symlink     /* symlink   [ORT §95] */
+  tmpfs_symlink,    /* symlink   [ORT §95] */
+  tmpfs_resolve     /* resolve   [ORT §96①] */
 };
 
 /****************************************************************************
@@ -2734,6 +2738,263 @@ static int tmpfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
   ret = tmpfs_create_directory(fs, relpath, NULL);
   tmpfs_unlock(fs);
   return ret;
+}
+
+/****************************************************************************
+ * Name: tmpfs_resolve
+ *
+ * Description:
+ *   [ORT §96①] 链接跟随（解析）：逐组件走 relpath；遇到符号链接就把
+ *   目标拼进路径继续走（相对目标按链接所在目录拼；".." 夹在挂载根上
+ *   —— 相对链接不能逃出本挂载）；绝对目标原样交出（跨挂载由 VFS 重
+ *   驱动，容器语义在 VFS 咽喉统一处理）。
+ *
+ *   返回 0（无链接）/ 1（buf=替换路径）/ 负错误。语义详见 fs.h 的
+ *   op 契约注释。静态缓冲：调用方（inode_search）持 g_inode_sem 全局
+ *   串行，且本函数不回调 VFS —— 静态安全。
+ *
+ ****************************************************************************/
+
+#define TMPFS_RESOLVE_MAX 300
+
+/* [ORT §96①] 文本规范化：折叠 "//"、去 "."、弹 ".."（夹在根上）。
+ * 就地改（路径短、串行段）。isabs 决定前导 '/' 是否保留。 */
+
+static void tmpfs_normpath(FAR char *path, bool isabs)
+{
+  FAR char *w = path + (isabs ? 1 : 0);
+  FAR char *r = w;
+  FAR char *base = path + (isabs ? 1 : 0);
+
+  while (*r != '\0')
+    {
+      if (*r == '/')
+        {
+          r++;
+          continue;
+        }
+
+      if (r[0] == '.' && (r[1] == '/' || r[1] == '\0'))
+        {
+          r += (r[1] == '/') ? 2 : 1;
+          continue;
+        }
+
+      if (r[0] == '.' && r[1] == '.' &&
+          (r[2] == '/' || r[2] == '\0'))
+        {
+          r += (r[2] == '/') ? 3 : 2;
+
+          /* 弹一组件（夹在根上） */
+
+          if (w > base)
+            {
+              w--;                       /* 退过末字符 */
+              while (w > base && w[-1] != '/')
+                {
+                  w--;
+                }
+
+              if (w > base)
+                {
+                  w--;                   /* 落在 '/' 上 */
+                }
+            }
+
+          continue;
+        }
+
+      if (w != base)
+        {
+          *w++ = '/';
+        }
+
+      while (*r != '\0' && *r != '/')
+        {
+          *w++ = *r++;
+        }
+    }
+
+  *w = '\0';
+}
+
+static int tmpfs_resolve(FAR struct inode *mountpt, FAR const char *relpath,
+                         bool nofollow, FAR char *buf, size_t bufsize)
+{
+  static char work[TMPFS_RESOLVE_MAX];
+  static char next[TMPFS_RESOLVE_MAX];
+  static char cur[TMPFS_RESOLVE_MAX];
+  static char comp[TMPFS_RESOLVE_MAX];
+  static char sub[TMPFS_RESOLVE_MAX];
+  FAR struct tmpfs_s *fs;
+  bool spliced = false;
+  bool isabs;
+  int  loops;
+
+  DEBUGASSERT(mountpt != NULL && relpath != NULL && buf != NULL);
+
+  fs = mountpt->i_private;
+  DEBUGASSERT(fs != NULL && fs->tfs_root.tde_object != NULL);
+
+  if (strlen(relpath) >= sizeof(work))
+    {
+      return -ENAMETOOLONG;
+    }
+
+  strlcpy(work, relpath, sizeof(work));
+  isabs = (work[0] == '/');
+  tmpfs_normpath(work, isabs);
+
+  for (loops = 0; loops <= SYMLOOP_MAX; loops++)
+    {
+      FAR const char *p = work + (isabs ? 1 : 0);
+      bool restarted = false;
+
+      cur[0] = '\0';
+
+      while (*p != '\0')
+        {
+          FAR struct tmpfs_object_s *to;
+          size_t l = 0;
+          int ret;
+
+          while (*p == '/')
+            {
+              p++;
+            }
+
+          if (*p == '\0')
+            {
+              break;
+            }
+
+          while (*p != '\0' && *p != '/')
+            {
+              if (l + 1 < sizeof(comp))
+                {
+                  comp[l++] = *p;
+                }
+
+              p++;
+            }
+
+          comp[l] = '\0';
+
+          if (cur[0] != '\0')
+            {
+              if (snprintf(sub, sizeof(sub), "%s/%s", cur, comp) >=
+                  (int)sizeof(sub))
+                {
+                  return -ENAMETOOLONG;
+                }
+            }
+          else
+            {
+              strlcpy(sub, comp, sizeof(sub));
+            }
+
+          ret = tmpfs_find_object(fs, sub, strlen(sub), &to, NULL);
+          if (ret < 0)
+            {
+              /* 到此为止（含悬挂目标）：拼接过就交**规范化后的 work**，
+               * 重驱动得到诚实的 ENOENT；没拼过 → 无链接原路返回 */
+
+              if (!spliced)
+                {
+                  return 0;
+                }
+
+              strlcpy(buf, work, bufsize);
+              return 1;
+            }
+
+          if (to->to_type != TMPFS_SYMLINK)
+            {
+              tmpfs_release_lockedobject(to);
+              strlcpy(cur, sub, sizeof(cur));
+              continue;
+            }
+
+          /* 是链接：终端链接在 nofollow 下不展开（读链接本身） */
+
+          if (*p == '\0' && nofollow)
+            {
+              tmpfs_release_lockedobject(to);
+
+              if (!spliced)
+                {
+                  return 0;
+                }
+
+              if (cur[0] != '\0')
+                {
+                  snprintf(buf, bufsize, "%s%s/%s",
+                           isabs ? "/" : "", cur, comp);
+                }
+              else
+                {
+                  snprintf(buf, bufsize, "%s%s", isabs ? "/" : "",
+                           comp);
+                }
+
+              return 1;
+            }
+
+          {
+            FAR struct tmpfs_symlink_s *tsl =
+              (FAR struct tmpfs_symlink_s *)to;
+            FAR const char *rest = p;
+
+            while (*rest == '/')
+              {
+                rest++;
+              }
+
+            int n;
+
+            if (tsl->tsl_target[0] == '/')
+              {
+                n = snprintf(next, sizeof(next), "%s%s%s", tsl->tsl_target,
+                             *rest != '\0' ? "/" : "", rest);
+                isabs = true;
+              }
+            else
+              {
+                n = snprintf(next, sizeof(next), "%s%s%s%s%s",
+                             cur, cur[0] != '\0' ? "/" : "",
+                             tsl->tsl_target,
+                             *rest != '\0' ? "/" : "", rest);
+                isabs = false;
+              }
+
+            if (n < 0 || n >= (int)sizeof(next))
+              {
+                return -ENAMETOOLONG;
+              }
+          }
+
+          tmpfs_release_lockedobject(to);
+
+          strlcpy(work, next, sizeof(work));
+          tmpfs_normpath(work, isabs);
+          spliced   = true;
+          restarted = true;
+          break;
+        }
+
+      if (!restarted)
+        {
+          if (!spliced)
+            {
+              return 0;
+            }
+
+          strlcpy(buf, work, bufsize);
+          return 1;
+        }
+    }
+
+  return -ELOOP;
 }
 
 /****************************************************************************
