@@ -32,6 +32,7 @@
 
 #include <nuttx/kmalloc.h>
 #include <nuttx/binfmt/binfmt.h>
+#include <sched/sched.h>
 
 #include "binfmt.h"
 
@@ -196,8 +197,23 @@ int exec_spawn(FAR const char *filename, FAR char * const *argv,
                int nexports, FAR const posix_spawn_file_actions_t *actions,
                FAR const posix_spawnattr_t *attr)
 {
-  return exec_internal(filename, argv, envp,
-                       exports, nexports, actions, attr, true);
+  int ret;
+
+  ret = exec_internal(filename, argv, envp,
+                      exports, nexports, actions, attr, true);
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §99] pid 命名空间第二刀：spawn 回传号本地化 —— 调用方在
+   * 命名空间内且子组同源 ⇒ 返回本地号（子 tcb 活体查表）；容器外
+   * （含内核初启起 init：调用点 root 空）原样返回，零影响。 */
+
+  if (ret > 0)
+    {
+      ret = (int)ort_pid_localize((pid_t)ret);
+    }
+#endif
+
+  return ret;
 }
 
 /****************************************************************************

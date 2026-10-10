@@ -56,6 +56,9 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
   struct siginfo info;
   sigset_t set;
   int ret = OK;
+#ifdef CONFIG_ORT_CONTAINER
+  uint32_t lpid = 0;                /* [ORT §99] 回收号本地化见证 */
+#endif
 
   /* Create a signal set that contains only SIGCHLD */
 
@@ -91,12 +94,20 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
                   *stat_loc = child->ch_status << 8;
                 }
 
+#ifdef CONFIG_ORT_CONTAINER
+              /* [ORT §99] 释放条目前取本地号（回收号回传本地化） */
+
+              lpid = child->ch_ort_lpid;
+#endif
               ret = child->ch_pid;
 
               /* Discard the child entry and break out of the loop */
 
               group_remove_child(rtcb->group, child->ch_pid);
               group_free_child(child);
+#ifdef CONFIG_ORT_CONTAINER
+              ret = ort_wait_localize(ret, lpid);
+#endif
               break;
             }
         }
@@ -123,6 +134,12 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
                   *stat_loc = child->ch_status << 8;
                 }
 
+#ifdef CONFIG_ORT_CONTAINER
+              /* [ORT §99] 释放条目前取本地号（回收号回传本地化） */
+
+              lpid = child->ch_ort_lpid;
+#endif
+
               /* Discard the child entry and break out of the loop */
 
               if ((options & WNOWAIT) == 0)
@@ -132,6 +149,9 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
                 }
 
               ret = pid;
+#ifdef CONFIG_ORT_CONTAINER
+              ret = ort_wait_localize(ret, lpid);
+#endif
               break;
             }
         }
@@ -209,12 +229,23 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
 
           pid = info.si_pid;
 
+#ifdef CONFIG_ORT_CONTAINER
+          lpid = 0;               /* 缺见证（无 retains / 条目未见）按全局回传 */
+#endif
 #ifdef CONFIG_SCHED_CHILD_STATUS
           if (retains)
             {
               /* Recover the exiting child */
 
               child = group_find_child(rtcb->group, info.si_pid);
+#ifdef CONFIG_ORT_CONTAINER
+              if (child != NULL)
+                {
+                  /* [ORT §99] 释放条目前取本地号 */
+
+                  lpid = child->ch_ort_lpid;
+                }
+#endif
 
               /* Discard the child entry, if we have one */
 
@@ -227,6 +258,9 @@ int waittcb(FAR struct tcb_s *rtcb, pid_t pid, int options,
 #endif /* CONFIG_SCHED_CHILD_STATUS */
 
           ret = pid;
+#ifdef CONFIG_ORT_CONTAINER
+          ret = ort_wait_localize(ret, lpid);
+#endif
           break;
         }
     }
@@ -306,6 +340,14 @@ pid_t nxsched_waitpid(pid_t pid, FAR int *stat_loc, int options)
   bool retains = false;
   irqstate_t flags;
   int ret = OK;
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §99] pid 命名空间第二刀：容器内 waitpid(L) 的**入口号**先按
+   * 本地号解析到全局号走原路（pid=-1/0 原样，同 §98 kill 口径）；
+   * **回收号**在 waittcb 各出口经 ort_wait_localize 换回本地号。 */
+
+  pid = ort_pid_resolve(pid);
+#endif
 
   /* NOTE: sched_lock() is not enough for SMP
    * because the child task is running on another CPU

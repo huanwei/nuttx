@@ -613,6 +613,10 @@ uint32_t ort_pidns_join(FAR const char *root);
 void     ort_pidns_put(FAR const char *root);
 pid_t    ort_pid_resolve(pid_t pid);
 
+/* [ORT §99] 第二刀：号回传本地化（spawn 活体查表 / waitpid 见证号） */
+pid_t    ort_pid_localize(pid_t gpid);
+pid_t    ort_wait_localize(pid_t gpid, uint32_t lpid);
+
 /* [ORT §54 欠账，§98 清] 架构侧实现（arch/arm/src/common/arm_ortcommon.h
  * 为准）；本处补声明消 task_prctl.c 的**隐式声明**（编译警告早就在，
  * 此前该 TU 未重编所以没露头——§94"警告必须看"同族）。 */

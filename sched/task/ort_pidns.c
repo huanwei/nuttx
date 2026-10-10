@@ -19,6 +19,20 @@
  *   命名空间**不隔离**内核对象生命周期（无 pid 翻译表 —— 本地号是
  *   组属性，组亡随亡）。
  *
+ *   ---- 第二刀（§99）：**进程管理号面**收进命名空间 ----
+ *     · spawn 回传号：exec_spawn 出口本地化（活体查表，见
+ *       ort_pid_localize）—— 容器内 spawn 拿到的就是本地号；
+ *     · waitpid：入口本地号优先解析（ort_pid_resolve 复用）；回收
+ *       号回传本地化 —— 子 tcb 回收时已亡，本地号靠**创建时留存**
+ *       在 child_status 的 ch_ort_lpid（nxtask_save_parent 处填），
+ *       见 ort_wait_localize。
+ *   两向都带"调用者是**容器成员**"谓词 —— 谓词 = §86/§96③ 同款
+ *   **tg_ort_re_root**（不是"root 非空"：设根者 orting 自己带 root
+ *   但 re_root=false，必须保持全局语义；§99 r1 实锤错谓词把 orting
+ *   的 spawn 记账换成"本地 1"）。谓词不过一律原样，零影响。
+ *   边界如实：无 retains（NOCLDWAIT）路径回传全局号；线程号面
+ *   （gettid）仍全局。
+ *
  ****************************************************************************/
 
 /****************************************************************************
@@ -184,10 +198,21 @@ pid_t ort_pid_resolve(pid_t pid)
       return pid;
     }
 
+  /* [§99] 容器谓词 = §86/§96③ 同款：**已重挂（tg_ort_re_root）**才算
+   * 容器成员。只用"root 非空"会把**设根者自己**（orting：带 root 传播
+   * 给孩子、但 re_root=false 走全局路径）也算进来 —— §99 r1 实锤：
+   * orting 读 spawn 回传号被换成子本地号 1（25 处 `spawned pid=1`），
+   * 故障线段配对全线崩。 */
+
+  if (!rtcb->group->tg_ort_re_root)
+    {
+      return pid;                 /* 非容器成员：全局语义原样 */
+    }
+
   root = rtcb->group->tg_ort_root;
   if (root == NULL || root[0] == '\0')
     {
-      return pid;                 /* 非容器：全局语义原样 */
+      return pid;                 /* 保险：成员必带 root */
     }
 
   flags = enter_critical_section();
@@ -211,6 +236,93 @@ pid_t ort_pid_resolve(pid_t pid)
 
   leave_critical_section(flags);
   return found;
+}
+
+/****************************************************************************
+ * Name: ort_pid_localize
+ *
+ * Description:
+ *   [§99 第二刀] **全局号 → 本地号**（活体查表版）：spawn 族把子进程号
+ *   交还调用者时用（子 tcb 尚在）。谓词与 ort_pid_resolve 对偶：调用者
+ *   是**容器成员（tg_ort_re_root）**且子组同源（root 相同）且子组有
+ *   本地号。任一不满足原样返回 —— 容器外/内核调用点零影响。
+ *
+ ****************************************************************************/
+
+pid_t ort_pid_localize(pid_t gpid)
+{
+  FAR struct tcb_s *rtcb = this_task();
+  FAR struct tcb_s *ctcb;
+  FAR const char *root;
+  irqstate_t flags;
+
+  if (gpid <= 0 || rtcb == NULL || rtcb->group == NULL)
+    {
+      return gpid;
+    }
+
+  /* [§99] 谓词同 resolve：只认**已重挂**的容器成员（设根者 orting 自己
+   * 不算 —— 它 spawn 容器后要读全局号做记账）。 */
+
+  if (!rtcb->group->tg_ort_re_root)
+    {
+      return gpid;
+    }
+
+  root = rtcb->group->tg_ort_root;
+  if (root == NULL || root[0] == '\0')
+    {
+      return gpid;
+    }
+
+  flags = enter_critical_section();
+  ctcb = nxsched_get_tcb(gpid);
+  if (ctcb != NULL && ctcb->group != NULL &&
+      ctcb->group->tg_ort_lpid != 0 &&
+      ctcb->group->tg_ort_root != NULL &&
+      strncmp(ctcb->group->tg_ort_root, root, ORT_PIDNS_ROOTLEN) == 0)
+    {
+      gpid = (pid_t)ctcb->group->tg_ort_lpid;
+    }
+
+  leave_critical_section(flags);
+  return gpid;
+}
+
+/****************************************************************************
+ * Name: ort_wait_localize
+ *
+ * Description:
+ *   [§99 第二刀] **全局号 → 本地号**（见证号版）：waitpid 回收时子 tcb
+ *   已亡，查不了表 —— 本地号来自子组**创建时**留存的 ch_ort_lpid
+ *  （nxtask_save_parent 处填，随 child_status 条目在 reparent 时一并
+ *   迁移）。谓词：调用者是**容器成员（tg_ort_re_root）**且见证号非 0
+ *  （0 = 子未曾入命名空间 / 见证缺失），否则原样返回。
+ *
+ *   注：不另比子 root —— 子组 root 随派生继承天然同源；reparent 只把
+ *   孩子交给 init/监督者（root 空），那一路本函数不生效（调用者在
+ *   空间外）。
+ *
+ ****************************************************************************/
+
+pid_t ort_wait_localize(pid_t gpid, uint32_t lpid)
+{
+  FAR struct tcb_s *rtcb = this_task();
+
+  if (lpid == 0 || rtcb == NULL || rtcb->group == NULL)
+    {
+      return gpid;
+    }
+
+  /* [§99] 谓词同 resolve：只认**已重挂**的容器成员 —— 设根者 orting
+   * 回收容器时按全局号回传（§99 r1 实锤：错谓词下 orting 拿回本地 1）。 */
+
+  if (!rtcb->group->tg_ort_re_root)
+    {
+      return gpid;
+    }
+
+  return (pid_t)lpid;
 }
 
 #endif /* CONFIG_ORT_CONTAINER */

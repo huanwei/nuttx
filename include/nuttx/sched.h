@@ -363,6 +363,9 @@ struct child_status_s
   uint8_t ch_flags;                 /* Child status:  See CHILD_FLAG_* defines */
   pid_t   ch_pid;                   /* Child task ID                           */
   int     ch_status;                /* Child exit status                       */
+#ifdef CONFIG_ORT_CONTAINER
+  uint32_t ch_ort_lpid;             /* [ORT §99] 子组容器本地号（0=未入命名空间） */
+#endif
 };
 #endif
 

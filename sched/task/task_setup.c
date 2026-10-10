@@ -313,6 +313,13 @@ static inline void nxtask_save_parent(FAR struct tcb_s *tcb, uint8_t ttype)
               child->ch_flags  = ttype;
               child->ch_pid    = tcb->pid;
               child->ch_status = 0;
+#ifdef CONFIG_ORT_CONTAINER
+              /* [ORT §99] 见证子组本地号 —— waitpid 回收时子 tcb 已亡，
+               * 本地号只能在这里留存（见 sched/sched_waitpid.c 第二刀；
+               * 本点位于 nxtask_init 的 §98 传播块之后，tg_ort_lpid 已定）。 */
+
+              child->ch_ort_lpid = tcb->group->tg_ort_lpid;
+#endif
 
               /* Add the entry into the group's list of children */
 
