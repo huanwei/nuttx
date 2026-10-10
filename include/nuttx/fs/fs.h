@@ -360,6 +360,19 @@ struct mountpt_operations
   CODE int     (*chstat)(FAR struct inode *mountpt, FAR const char *relpath,
                          FAR const struct stat *buf, int flags);
   CODE int     (*syncfs)(FAR struct inode *mountpt);
+
+  /* [ORT §95] 符号链接（挂载点**内容**里的，注意：不是伪 FS 节点的
+   * CONFIG_PSEUDOFS_SOFTLINKS 模型——挂载点内容没有 per-entry inode）。
+   * ★ 刻意加在**结构体尾部**：其余 FS 的位置式初始化表不受影响，
+   *   未列出的成员为 NULL ⇒ 不支持的 FS 自然 fail-closed。
+   * readlink：把 relpath 处链接的目标拷进 buf（有界，strlcpy 语义），
+   *   返回 0；不是链接 → 负错误码（-EINVAL）。
+   * symlink：在 relpath 处创建指向 target 的链接（目标串由 FS 拥有）。 */
+
+  CODE int     (*readlink)(FAR struct inode *mountpt, FAR const char *relpath,
+                           FAR char *buf, size_t bufsize);
+  CODE int     (*symlink)(FAR struct inode *mountpt, FAR const char *relpath,
+                          FAR const char *target);
 };
 #endif /* CONFIG_DISABLE_MOUNTPOINT */
 

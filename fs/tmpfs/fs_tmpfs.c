@@ -98,6 +98,7 @@ static int  tmpfs_realloc_file(FAR struct tmpfs_file_s *tfo,
               size_t newsize);
 static void tmpfs_release_lockedobject(FAR struct tmpfs_object_s *to);
 static void tmpfs_release_lockedfile(FAR struct tmpfs_file_s *tfo);
+static void tmpfs_release_lockedsymlink(FAR struct tmpfs_symlink_s *tsl);
 static int  tmpfs_release_file(FAR struct tmpfs_file_s *tfo);
 static int  tmpfs_find_dirent(FAR struct tmpfs_directory_s *tdo,
               FAR const char *name, size_t len);
@@ -111,6 +112,11 @@ static int  tmpfs_create_file(FAR struct tmpfs_s *fs,
               FAR const char *relpath, FAR struct tmpfs_file_s **tfo);
 static FAR struct tmpfs_directory_s *
 tmpfs_alloc_directory(FAR struct tmpfs_directory_s *parent);
+static FAR struct tmpfs_symlink_s *
+tmpfs_alloc_symlink(FAR struct tmpfs_directory_s *parent,
+              FAR const char *target);
+static int  tmpfs_create_symlink(FAR struct tmpfs_s *fs,
+              FAR const char *relpath, FAR const char *target);
 static int  tmpfs_create_directory(FAR struct tmpfs_s *fs,
               FAR const char *relpath, FAR struct tmpfs_directory_s **tdo);
 static int  tmpfs_find_object(FAR struct tmpfs_s *fs,
@@ -172,6 +178,10 @@ static int  tmpfs_rename(FAR struct inode *mountpt,
               FAR const char *oldrelpath, FAR const char *newrelpath);
 static void tmpfs_stat_common(FAR struct tmpfs_object_s *to,
               FAR struct stat *buf);
+static int  tmpfs_readlink(FAR struct inode *mountpt,
+              FAR const char *relpath, FAR char *buf, size_t bufsize);
+static int  tmpfs_symlink(FAR struct inode *mountpt,
+              FAR const char *relpath, FAR const char *target);
 static int  tmpfs_stat(FAR struct inode *mountpt, FAR const char *relpath,
               FAR struct stat *buf);
 
@@ -212,7 +222,10 @@ const struct mountpt_operations g_tmpfs_operations =
   tmpfs_rmdir,      /* rmdir */
   tmpfs_rename,     /* rename */
   tmpfs_stat,       /* stat */
-  NULL              /* chstat */
+  NULL,             /* chstat */
+  NULL,             /* syncfs */
+  tmpfs_readlink,   /* readlink  [ORT §95] */
+  tmpfs_symlink     /* symlink   [ORT §95] */
 };
 
 /****************************************************************************
@@ -360,10 +373,47 @@ static void tmpfs_release_lockedobject(FAR struct tmpfs_object_s *to)
     {
       tmpfs_release_lockedfile((FAR struct tmpfs_file_s *)to);
     }
+
+  /* [ORT §95] 链接对象：被 unlink 过的（UNLINKED）在最后一个引用
+   * 释放时销毁（与文件对象同款；否则只是解引用/解锁）。 */
+
+  else if (to->to_type == TMPFS_SYMLINK)
+    {
+      tmpfs_release_lockedsymlink((FAR struct tmpfs_symlink_s *)to);
+    }
   else
     {
       to->to_refs--;
       tmpfs_unlock_object(to);
+    }
+}
+
+/****************************************************************************
+ * Name: tmpfs_release_lockedsymlink
+ *
+ * Description:
+ *   [ORT §95] 释放一个加锁的符号链接对象引用。若对象已被 unlink
+ *   （TFO_FLAG_UNLINKED）且这是最后一个引用，就地销毁。
+ *
+ ****************************************************************************/
+
+static void tmpfs_release_lockedsymlink(FAR struct tmpfs_symlink_s *tsl)
+{
+  DEBUGASSERT(tsl && tsl->tsl_refs > 0);
+
+  /* On last reference, free the symlink object */
+
+  if (tsl->tsl_refs == 1 && (tsl->tsl_flags & TFO_FLAG_UNLINKED) != 0)
+    {
+      nxrmutex_unlock(&tsl->tsl_lock);
+      nxrmutex_destroy(&tsl->tsl_lock);
+      fs_heap_free(tsl->tsl_target);
+      fs_heap_free(tsl);
+    }
+  else
+    {
+      tsl->tsl_refs--;
+      nxrmutex_unlock(&tsl->tsl_lock);
     }
 }
 
@@ -588,6 +638,144 @@ tmpfs_alloc_file(FAR struct tmpfs_directory_s *parent)
   tmpfs_lock_file(tfo);
 
   return tfo;
+}
+
+/****************************************************************************
+ * Name: tmpfs_alloc_symlink
+ *
+ * Description:
+ *   [ORT §95] 分配一个符号链接对象。与 alloc_directory 同款：返回的
+ *   对象**未加锁、无引用**（创建路径 add_dirent 之后不需要句柄）；
+ *   目标串由对象自己拥有（fs_heap），随对象一起释放。
+ *
+ ****************************************************************************/
+
+static FAR struct tmpfs_symlink_s *
+tmpfs_alloc_symlink(FAR struct tmpfs_directory_s *parent,
+                    FAR const char *target)
+{
+  FAR struct tmpfs_symlink_s *tsl;
+  size_t len = strlen(target);
+
+  tsl = fs_heap_zalloc(sizeof(*tsl));
+  if (tsl == NULL)
+    {
+      return NULL;
+    }
+
+  tsl->tsl_target = fs_heap_strdup(target);
+  if (tsl->tsl_target == NULL)
+    {
+      fs_heap_free(tsl);
+      return NULL;
+    }
+
+  tsl->tsl_alloc     = sizeof(struct tmpfs_symlink_s) + len + 1;
+  tsl->tsl_type      = TMPFS_SYMLINK;
+  tsl->tsl_refs      = 0;
+  tsl->tsl_parent    = parent;
+  tsl->tsl_flags     = 0;
+  tsl->tsl_targetlen = len;
+
+  nxrmutex_init(&tsl->tsl_lock);
+
+  return tsl;
+}
+
+/****************************************************************************
+ * Name: tmpfs_create_symlink
+ *
+ * Description:
+ *   [ORT §95] 在 relpath 处创建指向 target 的符号链接（父目录解析与
+ *   重名检查与 tmpfs_create_file 同款）。目标串**原样**保存。
+ *
+ ****************************************************************************/
+
+static int tmpfs_create_symlink(FAR struct tmpfs_s *fs,
+                                FAR const char *relpath,
+                                FAR const char *target)
+{
+  FAR struct tmpfs_directory_s *parent;
+  FAR struct tmpfs_symlink_s *newtsl;
+  FAR const char *name;
+  int ret;
+
+  /* Separate the path into the link name and the parent directory path. */
+
+  name = strrchr(relpath, '/');
+  if (name == NULL)
+    {
+      name   = relpath;
+      parent = (FAR struct tmpfs_directory_s *)fs->tfs_root.tde_object;
+
+      ret = tmpfs_lock_directory(parent);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      parent->tdo_refs++;
+    }
+  else if (name[1] != '\0')
+    {
+      ret = tmpfs_find_directory(fs, relpath, name - relpath, &parent, NULL);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      name++;
+    }
+  else
+    {
+      return -EISDIR;
+    }
+
+  /* Verify that no object of this name already exists in the directory */
+
+  ret = tmpfs_find_dirent(parent, name, strlen(name));
+  if (ret != -ENOENT)
+    {
+      if (ret >= 0)
+        {
+          ret = -EEXIST;
+        }
+
+      goto errout_with_parent;
+    }
+
+  /* Allocate an empty symlink object (unlocked, unreferenced) */
+
+  newtsl = tmpfs_alloc_symlink(parent, target);
+  if (newtsl == NULL)
+    {
+      ret = -ENOMEM;
+      goto errout_with_parent;
+    }
+
+  /* Add the new symlink to the directory */
+
+  ret = tmpfs_add_dirent(parent, (FAR struct tmpfs_object_s *)newtsl, name);
+  if (ret < 0)
+    {
+      goto errout_with_symlink;
+    }
+
+  /* Release the reference and lock on the parent directory */
+
+  parent->tdo_refs--;
+  tmpfs_unlock_directory(parent);
+  return OK;
+
+errout_with_symlink:
+  nxrmutex_destroy(&newtsl->tsl_lock);
+  fs_heap_free(newtsl->tsl_target);
+  fs_heap_free(newtsl);
+
+errout_with_parent:
+  parent->tdo_refs--;
+  tmpfs_unlock_directory(parent);
+  return ret;
 }
 
 /****************************************************************************
@@ -1052,12 +1240,17 @@ static int tmpfs_find_file(FAR struct tmpfs_s *fs,
               tmpfs_unlock_directory(tdo);
             }
 
-          ret = -EISDIR;
+          /* [ORT §95] 链接节点：跟随（解析）本轮未实现 —— 给明确的
+           * fail-closed 错误（-ENOSYS），不误报成 -EISDIR。 */
+
+          ret = (to->to_type == TMPFS_SYMLINK) ? -ENOSYS : -EISDIR;
         }
+      else
+        {
+          /* Return the verified file object */
 
-      /* Return the verified file object */
-
-      *tfo = (FAR struct tmpfs_file_s *)to;
+          *tfo = (FAR struct tmpfs_file_s *)to;
+        }
     }
 
   return ret;
@@ -1192,6 +1385,14 @@ static int tmpfs_statfs_callout(FAR struct tmpfs_directory_s *tdo,
       tmpbuf->tsf_avail += to->to_alloc - tmptfo->tfo_size;
       tmpbuf->tsf_files++;
     }
+
+  /* [ORT §95] 链接对象按文件同款记账（它也是"节点"） */
+
+  else if (to->to_type == TMPFS_SYMLINK)
+    {
+      tmpbuf->tsf_alloc += to->to_alloc;
+      tmpbuf->tsf_files++;
+    }
   else /* if (to->to_type == TMPFS_DIRECTORY) */
     {
       FAR struct tmpfs_directory_s *tmptdo;
@@ -1266,6 +1467,22 @@ static int tmpfs_free_callout(FAR struct tmpfs_directory_s *tdo,
         }
 
       fs_heap_free(tfo->tfo_data);
+    }
+
+  /* [ORT §95] 链接对象：有引用则标记 unlinked（由最后一个释放销毁），
+   * 否则释放目标串并随通用尾销毁。 */
+
+  else if (to->to_type == TMPFS_SYMLINK)
+    {
+      FAR struct tmpfs_symlink_s *tsl = (FAR struct tmpfs_symlink_s *)to;
+
+      if (tsl->tsl_refs > 0)
+        {
+          tsl->tsl_flags |= TFO_FLAG_UNLINKED;
+          return TMPFS_UNLINKED;
+        }
+
+      fs_heap_free(tsl->tsl_target);
     }
   else /* if (to->to_type == TMPFS_DIRECTORY) */
     {
@@ -2141,6 +2358,12 @@ static int tmpfs_readdir(FAR struct inode *mountpt,
 
            entry->d_type = DTYPE_DIRECTORY;
         }
+      else if (to->to_type == TMPFS_SYMLINK)
+        {
+          /* A symbolic link [ORT §95] */
+
+           entry->d_type = DTYPE_LINK;
+        }
       else /* to->to_type == TMPFS_REGULAR) */
         {
           /* A regular file */
@@ -2351,6 +2574,7 @@ static int tmpfs_statfs(FAR struct inode *mountpt, FAR struct statfs *buf)
 static int tmpfs_unlink(FAR struct inode *mountpt, FAR const char *relpath)
 {
   FAR struct tmpfs_s *fs;
+  FAR struct tmpfs_object_s *to = NULL;
   FAR struct tmpfs_directory_s *tdo;
   FAR struct tmpfs_file_s *tfo = NULL;
   FAR const char *name;
@@ -2372,18 +2596,27 @@ static int tmpfs_unlink(FAR struct inode *mountpt, FAR const char *relpath)
       return ret;
     }
 
-  /* Find the file object and parent directory associated with this relative
-   * path.  If successful, tmpfs_find_file will lock both the file object
+  /* Find the object and parent directory associated with this relative
+   * path.  If successful, tmpfs_find_object will lock both the object
    * and the parent directory and take one reference count on each.
+   *
+   * [ORT §95] 改用 find_object（类型无关）：原来经 find_file 的写法
+   * 会让链接节点的 unlink 误报 -EISDIR；链接与文件走同一条删除链。
    */
 
-  ret = tmpfs_find_file(fs, relpath, &tfo, &tdo);
+  ret = tmpfs_find_object(fs, relpath, strlen(relpath), &to, &tdo);
   if (ret < 0)
     {
       goto errout_with_lock;
     }
 
-  DEBUGASSERT(tfo != NULL);
+  DEBUGASSERT(to != NULL);
+
+  if (to->to_type == TMPFS_DIRECTORY)
+    {
+      ret = -EISDIR;               /* 目录用 rmdir；文件名尾 '/' 同此 */
+      goto errout_with_objects;
+    }
 
   /* Get the file name from the relative path */
 
@@ -2413,22 +2646,39 @@ static int tmpfs_unlink(FAR struct inode *mountpt, FAR const char *relpath)
    * unlinked
    */
 
-  if (tfo->tfo_refs > 1)
+  if (to->to_refs > 1)
     {
       /* Make the file object as unlinked */
 
-      tfo->tfo_flags |= TFO_FLAG_UNLINKED;
+      if (to->to_type == TMPFS_SYMLINK)
+        {
+          ((FAR struct tmpfs_symlink_s *)to)->tsl_flags |= TFO_FLAG_UNLINKED;
+        }
+      else
+        {
+          ((FAR struct tmpfs_file_s *)to)->tfo_flags |= TFO_FLAG_UNLINKED;
+        }
 
       /* Release the reference count on the file object */
 
-      tfo->tfo_refs--;
-      tmpfs_unlock_file(tfo);
+      to->to_refs--;
+      tmpfs_unlock_object(to);
     }
 
   /* Otherwise we can free the object now */
 
+  else if (to->to_type == TMPFS_SYMLINK)
+    {
+      FAR struct tmpfs_symlink_s *tsl = (FAR struct tmpfs_symlink_s *)to;
+
+      nxrmutex_destroy(&tsl->tsl_lock);
+      fs_heap_free(tsl->tsl_target);
+      fs_heap_free(tsl);
+    }
   else
     {
+      tfo = (FAR struct tmpfs_file_s *)to;
+
       nxrmutex_destroy(&tfo->tfo_lock);
       fs_heap_free(tfo->tfo_data);
       fs_heap_free(tfo);
@@ -2443,7 +2693,7 @@ static int tmpfs_unlink(FAR struct inode *mountpt, FAR const char *relpath)
   return OK;
 
 errout_with_objects:
-  tmpfs_release_lockedfile(tfo);
+  tmpfs_release_lockedobject(to);
 
   tdo->tdo_refs--;
   tmpfs_unlock_directory(tdo);
@@ -2482,6 +2732,95 @@ static int tmpfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
   /* Create the directory. */
 
   ret = tmpfs_create_directory(fs, relpath, NULL);
+  tmpfs_unlock(fs);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: tmpfs_readlink
+ *
+ * Description:
+ *   [ORT §95] 读挂载点内容里的符号链接目标（VFS readlink() 的挂载点
+ *   路由出口）。strlcpy 语义（有界、总是结尾 NUL）；不是链接 → -EINVAL。
+ *
+ ****************************************************************************/
+
+static int tmpfs_readlink(FAR struct inode *mountpt,
+                          FAR const char *relpath,
+                          FAR char *buf, size_t bufsize)
+{
+  FAR struct tmpfs_s *fs;
+  FAR struct tmpfs_object_s *to;
+  int ret;
+
+  DEBUGASSERT(mountpt != NULL && relpath != NULL && buf != NULL);
+
+  fs = mountpt->i_private;
+  DEBUGASSERT(fs != NULL && fs->tfs_root.tde_object != NULL);
+
+  ret = tmpfs_lock(fs);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* Find the object at this path (locked, one reference) */
+
+  ret = tmpfs_find_object(fs, relpath, strlen(relpath), &to, NULL);
+  if (ret < 0)
+    {
+      goto errout_with_fslock;
+    }
+
+  if (to->to_type != TMPFS_SYMLINK)
+    {
+      ret = -EINVAL;
+      goto errout_with_object;
+    }
+
+  strlcpy(buf, ((FAR struct tmpfs_symlink_s *)to)->tsl_target, bufsize);
+  ret = OK;
+
+errout_with_object:
+  tmpfs_release_lockedobject(to);
+
+errout_with_fslock:
+  tmpfs_unlock(fs);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: tmpfs_symlink
+ *
+ * Description:
+ *   [ORT §95] 在挂载点内容里创建符号链接（VFS symlink() 的挂载点
+ *   路由出口）。目标串原样保存 —— 解析（跟随）不在本轮范围，见手册。
+ *
+ ****************************************************************************/
+
+static int tmpfs_symlink(FAR struct inode *mountpt,
+                         FAR const char *relpath, FAR const char *target)
+{
+  FAR struct tmpfs_s *fs;
+  int ret;
+
+  DEBUGASSERT(mountpt != NULL && relpath != NULL && target != NULL);
+
+  if (target[0] == '\0')
+    {
+      return -EINVAL;              /* 空目标：无意义，fail-closed */
+    }
+
+  fs = mountpt->i_private;
+  DEBUGASSERT(fs != NULL && fs->tfs_root.tde_object != NULL);
+
+  ret = tmpfs_lock(fs);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = tmpfs_create_symlink(fs, relpath, target);
   tmpfs_unlock(fs);
   return ret;
 }
@@ -2775,6 +3114,20 @@ static void tmpfs_stat_common(FAR struct tmpfs_object_s *to,
       /* Get the size of the object */
 
       objsize = tfo->tfo_size;
+    }
+  else if (to->to_type == TMPFS_SYMLINK)
+    {
+      FAR struct tmpfs_symlink_s *tsl =
+        (FAR struct tmpfs_symlink_s *)to;
+
+      /* lrwxrwxrwx（stat 看链接**自身** —— lstat 语义；跟随未实现，
+       * 手册 §95 边界） */
+
+      buf->st_mode = S_IRWXO | S_IRWXG | S_IRWXU | S_IFLNK;
+
+      /* 链接的"大小" = 目标串长度（与真 Unix 一致） */
+
+      objsize = tsl->tsl_targetlen;
     }
   else /* if (to->to_type == TMPFS_DIRECTORY) */
     {

@@ -49,6 +49,9 @@ static int _inode_linktarget(FAR struct inode *inode,
 #endif
 static int _inode_search(FAR struct inode_search_s *desc);
 static FAR const char *_inode_getcwd(void);
+#ifdef CONFIG_ORT_CONTAINER
+static int _ort_reroot(FAR struct inode_search_s *desc, bool fromcwd);
+#endif
 
 /****************************************************************************
  * Public Data
@@ -132,6 +135,66 @@ static int _inode_compare(FAR const char *fname, FAR struct inode *inode)
 }
 
 /****************************************************************************
+ * Name: _ort_reroot
+ *
+ * Description:
+ *   [ORT §86/§95] 容器重挂（chroot 族）的**唯一实现** —— inode_search
+ *   与软链接跟随（_inode_linktarget）共用，保证"跟随走过的路径"和
+ *   "直接给的路径"走同一咽喉：
+ *
+ *     · 本组是重挂容器（tg_ort_re_root）且路径为绝对路径 ⇒ 就地替换
+ *       desc 路径为 `<root><path>`；
+ *     · fromcwd 为真（PWD 展开来的路径）且已在根内 ⇒ 原样 —— 那是同一
+ *       inode 的全局写法；根外则夹回根内（真实 chroot 同款的逃逸角）。
+ *     · 其余情况 no-op（设根者/内核线程/非绝对路径）。
+ *
+ *   返回 0 或负错误码（ENOMEM）。
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_ORT_CONTAINER
+static int _ort_reroot(FAR struct inode_search_s *desc, bool fromcwd)
+{
+  FAR struct tcb_s *rtcb = nxsched_self();
+
+
+  if (rtcb == NULL || rtcb->group == NULL ||
+      !rtcb->group->tg_ort_re_root || rtcb->group->tg_ort_root == NULL ||
+      desc->path[0] != '/')
+    {
+      return 0;
+    }
+
+  {
+    FAR const char *root = rtcb->group->tg_ort_root;
+    size_t rlen = strlen(root);
+    bool within = (strncmp(desc->path, root, rlen) == 0 &&
+                   (desc->path[rlen] == '/' || desc->path[rlen] == '\0'));
+
+    if (!fromcwd || !within)
+      {
+        FAR char *rp;
+
+        if (fs_heap_asprintf(&rp, "%s%s", root, desc->path) < 0)
+          {
+            return -ENOMEM;
+          }
+
+        if (desc->buffer != NULL)
+          {
+            fs_heap_free(desc->buffer);
+          }
+
+        desc->buffer = rp;
+        desc->path   = desc->buffer;
+      }
+  }
+
+  return 0;
+}
+#endif
+
+/****************************************************************************
  * Name: _inode_linktarget
  *
  * Description:
@@ -165,6 +228,19 @@ static int _inode_linktarget(FAR struct inode *inode,
 
       RELEASE_SEARCH(desc);
       SETUP_SEARCH(desc, link, true);
+
+#ifdef CONFIG_ORT_CONTAINER
+      /* [ORT §95] 跟随即咽喉：绝对目标的软链接在重挂容器里按**容器根**
+       * 解析（chroot 语义）。原实现直进 _inode_search、绕过 §86 的
+       * 重挂 —— 潜伏逃逸面（伪 FS 软链接一旦在容器可达处出现即被利用）。
+       * 相对目标维持原语义（仅伪 FS 链接，目标按约定为完整路径）。 */
+
+      ret = _ort_reroot(desc, false);
+      if (ret < 0)
+        {
+          break;
+        }
+#endif
 
       /* Look up inode associated with the target of the symbolic link */
 
@@ -495,49 +571,16 @@ int inode_search(FAR struct inode_search_s *desc)
 
 #ifdef CONFIG_ORT_CONTAINER
   /* [ORT §86] 容器 root（chroot 族）：绝对路径重挂到本组的根 ——
-   * 这是**唯一咽喉**：VFS 所有按路径的进入点最终都走到这里。
-   *
-   *   · 直接给的绝对路径（哪怕拼得像全局的 "/v/..."）**一律**前挂：
-   *     容器不能靠拼全局路径逃出视图（"/v/x" ⇒ "<root>/v/x"）。
-   *   · 由 PWD 相对展开来的路径（NuttX 的 cwd 就是 PWD 环境变量）：
-   *     已在根内（前缀匹配）则原样 —— 它是同一 inode 的全局写法；
-   *     根外（PWD 指向视图之外，真实 chroot 同款的逃逸角）夹回根内。
-   *   · 只在 tg_ort_re_root 的容器组里生效：设根者（监督者）不重挂、
-   *     内核线程组无根 —— 天然 no-op。
+   * 这是**唯一咽喉**：VFS 所有按路径的进入点最终都走到这里；软链接
+   * 跟随（_inode_linktarget）也共用同一实现（§95 收口）。语义详见
+   * _ort_reroot() 的注释。
    */
 
-  {
-    FAR struct tcb_s *rtcb = nxsched_self();
-
-    if (rtcb != NULL && rtcb->group != NULL &&
-        rtcb->group->tg_ort_re_root && rtcb->group->tg_ort_root != NULL &&
-        desc->path[0] == '/')
-      {
-        FAR const char *root = rtcb->group->tg_ort_root;
-        size_t rlen = strlen(root);
-        bool within = (strncmp(desc->path, root, rlen) == 0 &&
-                       (desc->path[rlen] == '/' ||
-                        desc->path[rlen] == '\0'));
-
-        if (!fromcwd || !within)
-          {
-            FAR char *rp;
-
-            if (fs_heap_asprintf(&rp, "%s%s", root, desc->path) < 0)
-              {
-                return -ENOMEM;
-              }
-
-            if (desc->buffer != NULL)
-              {
-                fs_heap_free(desc->buffer);
-              }
-
-            desc->buffer = rp;
-            desc->path   = desc->buffer;
-          }
-      }
-  }
+  ret = _ort_reroot(desc, fromcwd);
+  if (ret < 0)
+    {
+      return ret;
+    }
 #endif
 
   ret = _inode_search(desc);

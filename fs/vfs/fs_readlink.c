@@ -94,6 +94,34 @@ ssize_t readlink(FAR const char *path, FAR char *buf, size_t bufsize)
   node = desc.node;
   DEBUGASSERT(node != NULL);
 
+#ifndef CONFIG_DISABLE_MOUNTPOINT
+  /* [ORT §95] path 落在**挂载点内容**里（node = 挂载点 inode，desc.relpath
+   * = 卷内相对路径）：路由给该 FS 的 readlink op —— 挂载点内容没有
+   * per-entry inode，INODE_IS_SOFTLINK 节点模型不适用。 */
+
+  if (INODE_IS_MOUNTPT(node) && desc.relpath[0] != '\0')
+    {
+      if (node->u.i_mops != NULL && node->u.i_mops->readlink != NULL)
+        {
+          ret = node->u.i_mops->readlink(node, desc.relpath, buf, bufsize);
+          if (ret < 0)
+            {
+              errcode = -ret;
+              goto errout_with_inode;
+            }
+
+          inode_release(node);
+          RELEASE_SEARCH(&desc);
+          return strlen(buf);
+        }
+
+      /* 该 FS 没有 readlink 实现：不可能是链接 */
+
+      errcode = EINVAL;
+      goto errout_with_inode;
+    }
+#endif
+
   /* An inode was found that includes this path and possibly refers to a
    * symbolic link.
    *

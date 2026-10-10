@@ -51,7 +51,8 @@
 enum tmpfs_objtype_e
 {
   TMPFS_DIRECTORY = 0,  /* Directory */
-  TMPFS_REGULAR         /* Regular file */
+  TMPFS_REGULAR,        /* Regular file */
+  TMPFS_SYMLINK         /* [ORT §95] Symbolic link */
 };
 
 /* Values returned by tmpfs_foreach() */
@@ -129,6 +130,33 @@ struct tmpfs_file_s
   uint8_t       tfo_flags; /* See TFO_FLAG_* definitions */
   size_t        tfo_size;  /* Valid file size */
   FAR uint8_t  *tfo_data;  /* File data starts here */
+};
+
+/* [ORT §95] The form of a symbolic link memory object.
+ *
+ * 与伪 FS 软链接（CONFIG_PSEUDOFS_SOFTLINKS 的 inode->u.i_link）不同：
+ * 挂载点内容没有 per-entry inode，目标串由本对象自己拥有（fs_heap
+ * 分配，与对象同生共死）。目标串原样保存 —— 不做规范化（真镜像的
+ * 链接目标常是绝对路径 /bin/busybox，它只是字符串；解析语义见
+ * 手册 §95：本轮只做创建/读取/呈现，不做跟随）。
+ */
+
+struct tmpfs_symlink_s
+{
+  /* First fields must match common TMPFS object layout */
+
+  rmutex_t tsl_lock;
+
+  size_t   tsl_alloc;    /* Allocated size of the symlink object */
+  uint8_t  tsl_type;     /* See enum tmpfs_objtype_e */
+  uint8_t  tsl_refs;     /* Reference count */
+  FAR struct tmpfs_directory_s *tsl_parent;
+
+  /* Remaining fields are unique to a symlink object */
+
+  uint8_t       tsl_flags;     /* See TFO_FLAG_* definitions */
+  size_t        tsl_targetlen; /* Length of the target string */
+  FAR char     *tsl_target;    /* Link target (owned, fs_heap) */
 };
 
 /* This structure represents one instance of a TMPFS file system */

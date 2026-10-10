@@ -138,6 +138,10 @@ static int     unionfs_trystatdir(FAR struct inode *inode,
 static int     unionfs_trystatfile(FAR struct inode *inode,
                                    FAR const char *relpath,
                                    FAR const char *prefix);
+static int     unionfs_tryreadlink(FAR struct inode *inode,
+                                   FAR const char *relpath,
+                                   FAR const char *prefix,
+                                   FAR char *buf, size_t bufsize);
 static FAR char *unionfs_relpath(FAR const char *path,
                                  FAR const char *name);
 
@@ -204,6 +208,9 @@ static int     unionfs_rename(FAR struct inode *mountpt,
                               FAR const char *newrelpath);
 static int     unionfs_stat(FAR struct inode *mountpt,
                             FAR const char *relpath, FAR struct stat *buf);
+static int     unionfs_readlink(FAR struct inode *mountpt,
+                                FAR const char *relpath,
+                                FAR char *buf, size_t bufsize);
 static int     unionfs_chstat(FAR struct inode *mountpt,
                               FAR const char *relpath,
                               FAR const struct stat *buf, int flags);
@@ -260,7 +267,11 @@ const struct mountpt_operations g_unionfs_operations =
   unionfs_rmdir,       /* rmdir */
   unionfs_rename,      /* rename */
   unionfs_stat,        /* stat */
-  unionfs_chstat       /* chstat */
+  unionfs_chstat,      /* chstat */
+  NULL,                /* syncfs（未用，保持位置） */
+  unionfs_readlink,    /* readlink  [ORT §95] */
+  NULL                 /* symlink   [ORT §95]：经视图**创建**链接不做
+                        * （写入面属 upper 层语义，未做前 fail-closed） */
 };
 
 /****************************************************************************
@@ -576,6 +587,39 @@ static int unionfs_trystat(FAR struct inode *inode, FAR const char *relpath,
     }
 
   return ops->stat(inode, trypath, buf);
+}
+
+/****************************************************************************
+ * Name: unionfs_tryreadlink
+ *
+ * Description:
+ *   [ORT §95] 在某层上读符号链接目标（stat 同款的前缀换算 + op 直调）。
+ *
+ ****************************************************************************/
+
+static int unionfs_tryreadlink(FAR struct inode *inode,
+                               FAR const char *relpath,
+                               FAR const char *prefix,
+                               FAR char *buf, size_t bufsize)
+{
+  FAR const struct mountpt_operations *ops;
+  FAR const char *trypath;
+
+  /* Is this path valid on this file system? */
+
+  trypath = unionfs_offsetpath(relpath, prefix);
+  if (trypath == NULL)
+    {
+      return -ENOENT;
+    }
+
+  ops = inode->u.i_mops;
+  if (!ops->readlink)
+    {
+      return -ENOSYS;
+    }
+
+  return ops->readlink(inode, trypath, buf, bufsize);
 }
 
 /****************************************************************************
@@ -3419,6 +3463,73 @@ static int unionfs_stat(FAR struct inode *mountpt, FAR const char *relpath,
         {
           ret = -ENOENT;
         }
+    }
+
+  return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_readlink
+ *
+ * Description:
+ *   [ORT §95] 读链接：上层命中即上层（遮蔽语义与 stat 一致），否则下层。
+ *   白障/标记路径遮蔽。
+ *
+ ****************************************************************************/
+
+static int unionfs_readlink(FAR struct inode *mountpt,
+                            FAR const char *relpath,
+                            FAR char *buf, size_t bufsize)
+{
+  FAR struct unionfs_inode_s *ui;
+  FAR struct unionfs_mountpt_s *um;
+  int ret;
+
+  finfo("relpath: %s\n", relpath);
+
+  DEBUGASSERT(mountpt != NULL && mountpt->i_private != NULL &&
+              relpath != NULL);
+  ui = mountpt->i_private;
+
+  /* [ORT §85] 标记路径视图不可见 */
+
+  if (unionfs_hidemarker(relpath))
+    {
+      return -ENOENT;
+    }
+
+  /* 上层：读到了就是它 */
+
+  um  = &ui->ui_fs[0];
+  ret = unionfs_tryreadlink(um->um_node, relpath, um->um_prefix,
+                            buf, bufsize);
+  if (ret >= 0)
+    {
+      return OK;
+    }
+
+  /* 上层明确说"有节点但不是链接"（-EINVAL）：遮蔽下层，不得穿透 */
+
+  if (ret == -EINVAL)
+    {
+      return ret;
+    }
+
+  /* [ORT §85] 被白障遮蔽 → ENOENT */
+
+  if (unionfs_lowerhidden(ui, relpath))
+    {
+      return -ENOENT;
+    }
+
+  /* 下层 */
+
+  um  = &ui->ui_fs[1];
+  ret = unionfs_tryreadlink(um->um_node, relpath, um->um_prefix,
+                            buf, bufsize);
+  if (ret >= 0)
+    {
+      return OK;
     }
 
   return ret;

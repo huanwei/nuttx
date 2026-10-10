@@ -103,24 +103,44 @@ int symlink(FAR const char *path1, FAR const char *path2)
        * link.
        */
 
-#ifndef CONFIG_DISABLE_MOUNTPOINT
-      /* Check if the inode is a mountpoint. */
-
       DEBUGASSERT(desc.node != NULL);
-      if (INODE_IS_MOUNTPT(desc.node))
-        {
-          /* Symbolic links within the mounted volume are not supported */
 
-          errcode = ENOSYS;
-        }
-      else
+      /* [ORT §95] path2 落在**挂载点内容**里（desc.node = 挂载点 inode，
+       * desc.relpath = 卷内相对路径）：路由给该 FS 的 symlink op。
+       * （原实现在这里一律 ENOSYS —— "文件系统不支持符号链接"的
+       * 上游常态；我们的临时文件系统与 OCI 层解包需要它。） */
+
+#ifndef CONFIG_DISABLE_MOUNTPOINT
+      if (INODE_IS_MOUNTPT(desc.node) && desc.relpath[0] != '\0')
+        {
+          if (desc.node->u.i_mops == NULL ||
+              desc.node->u.i_mops->symlink == NULL)
+            {
+              errcode = ENOSYS;   /* 该 FS 未实现：fail-closed */
+              goto errout_with_inode;
+            }
+
+          ret = desc.node->u.i_mops->symlink(desc.node, desc.relpath, path1);
+          if (ret < 0)
+            {
+              errcode = -ret;
+              goto errout_with_inode;
+            }
+
+          /* Symbolic link successfully created */
+
+          inode_release(desc.node);
+          RELEASE_SEARCH(&desc);
+#ifdef CONFIG_FS_NOTIFY
+          notify_create(path2);
 #endif
-        {
-          /* A node already exists in the pseudofs at 'path1' */
-
-          errcode = EEXIST;
+          return OK;
         }
+#endif
 
+      /* 已存在节点（伪 FS 节点，或 path2 就是挂载点本身）：EEXIST */
+
+      errcode = EEXIST;
       goto errout_with_inode;
     }
 
