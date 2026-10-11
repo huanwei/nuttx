@@ -923,7 +923,16 @@ pid_t ort_supervisor_pid(void)
    *   取决于 g_supervisor 的初值；现在取决于这一个函数。
    *
    *   已钉住后**不查存活**：监督者死了槽位保持钉住（与故障通知
-   *   路径同一规矩，见 ort_fault_notify），因此这里也不能查活。 */
+   *   路径同一规矩，见 ort_fault_notify），因此这里也不能查活。
+   *
+   * ★★ [§108] **前提绊线：pid 单调不复用** —— 全部"pid 判据"成立的
+   *   地基。NuttX 的 pid 分配是 `next_pid = g_lastpid + 1`（单调递增、
+   *   死号不回收；唯一插入点 `sched/task/task_setup.c`，落号在
+   *   `tcb->pid = next_pid`）。因此"槽位钉住 + pid 比较"在**有限运行
+   *   内**没有"pid 复用继承权限"的面（未收口表该半如此收口，代码实
+   *   证）；理论窗口只剩 pid_t 回绕（2^31 创建数，原型量级外）。
+   *   ⚠️ 若上游把分配改成"回收空号"，**本文件所有 pid 判据立即变成
+   *   权限继承缺陷**（H28 族）—— 升级时优先复查此点。 */
 
   return g_supervisor_pinned ? g_supervisor : (pid_t)-1;
 }

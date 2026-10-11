@@ -209,9 +209,13 @@
 
 /* [ORT] 注册 ORT 监督者：内核在容器故障时向该任务发信号（prototype）
  *
- *   prctl(PR_SET_ORT_SUPERVISOR);
+ *   prctl(PR_SET_ORT_SUPERVISOR, CONFIG_ORT_SUPERVISOR_TOKEN);
  *
  * 只接受首次注册（单槽）。重复注册返回 -EBUSY。
+ *
+ * ★ [§108] 资格=**两层**（分开见证，可分辨）：① 任务名在构建期白名单
+ *   `CONFIG_ORT_SUPERVISOR_TASKNAMES` 内；② 呈递凭据 == 构建期
+ *   `CONFIG_ORT_SUPERVISOR_TOKEN`。缺任一 → -EPERM。
  */
 #define PR_SET_ORT_SUPERVISOR 8
 

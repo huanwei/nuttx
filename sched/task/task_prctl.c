@@ -296,6 +296,23 @@ int prctl(int option, ...)
               }
           }
 
+          /* ★★ [§108] 凭据级鉴权（第二层）：呈递值必须等于构建期
+           *   `CONFIG_ORT_SUPERVISOR_TOKEN`。
+           *
+           *   为什么名字层不够：任务名不是安全边界（能改名的任务就能
+           *   过线 —— `PR_SET_NAME` 一行）。两层**分开见证**（alert
+           *   文案不同）⇒ 装置能分辨是哪一层拦下的。
+           *
+           *   ⚠️ 诚实边界：凭据编译进内核/导出配置，可提取 ——
+           *   "凭据级"非"密钥级"；产品化换每次上电随机/硬件绑定。 */
+
+          if ((uint32_t)va_arg(ap, uintptr_t) !=
+              (uint32_t)CONFIG_ORT_SUPERVISOR_TOKEN)
+            {
+              _alert("ORT: supervisor registration rejected: bad token\n");
+              return -EPERM;
+            }
+
           return ort_supervisor_set((int)this_task()->pid);
         }
 

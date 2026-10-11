@@ -2134,6 +2134,22 @@ config ORT_SUPERVISOR_RESET
 		  （《降级状态机设计》§2.1：经鉴权的操作员复位 / 断电重启），
 		  而不是一个任何任务都能调的 prctl。
 
+config ORT_SUPERVISOR_TOKEN
+	hex "Supervisor registration credential (PROTOTYPE — see help)"
+	default 0x4f525431
+	---help---
+		[ORT §108] 首次注册监督者必须呈递的**构建期凭据**：
+		`prctl(PR_SET_ORT_SUPERVISOR, CONFIG_ORT_SUPERVISOR_TOKEN)`。
+
+		为什么加这一层：任务名白名单（见下）在同一构建内**不是安全
+		边界** —— 能改名的任务就能过线（`PR_SET_NAME` 一行的事）。
+		凭据层把缺口从"知道名字"收紧到"知道构建期常量"。
+
+		⚠️ 诚实边界（如实）：本值编译进内核与所有读者（导出配置随
+		export 下发），**可提取** —— 这是"凭据级"而非"密钥级"。
+		产品化应换成每次上电随机 / 硬件绑定凭据（与《降级状态机
+		设计》§2.1 的"经鉴权的操作员复位"同一条产品化线的下端）。
+
 config ORT_SUPERVISOR_TASKNAMES
 	string "Supervisor task name allow-list (comma separated)"
 	default "ortsup,orttest,ortbad"
