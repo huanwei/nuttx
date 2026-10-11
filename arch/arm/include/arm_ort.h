@@ -59,10 +59,13 @@ int ort_supervisor_set(pid_t pid);
  *   pid        = 容器组 pid
  *   ort_domain = 组绑定的域（**原始编码**：tg_ort_domain，域 n 存为 n+1）
  *   code       = 退出码
+ *   ready      = [§105] 退出**时刻**的就绪位（调用者 group_leave 当场取 ——
+ *                此刻受害者 tcb 可能已亡，不能在记录函数里现查）
  * 只有"已绑域且无故障史"的组会走到这里（调用点在 group_leave）。
  * 监督者未注册时静默丢弃 —— 与故障通知同规矩。 */
 
-void ort_group_exit_notify(pid_t pid, uint8_t ort_domain, int code);
+void ort_group_exit_notify(pid_t pid, uint8_t ort_domain, int code,
+                           uint32_t ready);
 
 /* ③ 准入协议：阻塞等待监督者把**本组**绑好域（手册 §三·补五十）。
  *   返回 0 = 已准入；-ETIMEDOUT = 超时；其它负值 = errno。

@@ -214,7 +214,8 @@ void group_leave(FAR struct tcb_s *tcb)
             {
               ort_group_exit_notify((pid_t)group->tg_pid,
                                     (uint8_t)group->tg_ort_domain,
-                                    group->tg_ort_exitcode);
+                                    group->tg_ort_exitcode,
+                                    (uint32_t)group->tg_ort_ready);
             }
 #endif
 

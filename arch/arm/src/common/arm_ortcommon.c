@@ -1001,6 +1001,17 @@ int ort_supervisor_reset(void)
 }
 #endif
 
+/* [§105] 取受害组的"已就绪"位（事件记录用）。查不到（组已散）按 0 ——
+ * "不存在"与"未上报"同义（§51 口径）。 */
+
+static uint32_t ort_victim_ready(pid_t victim)
+{
+  FAR struct tcb_s *tcb = nxsched_get_tcb(victim);
+
+  return (tcb != NULL && tcb->group != NULL &&
+          tcb->group->tg_ort_ready != 0) ? 1u : 0u;
+}
+
 void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
                       uint32_t faults)
 {
@@ -1120,6 +1131,7 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
     s->faults = faults;
     s->kind   = 0;      /* FAULT */
     s->code   = 0;
+    s->ready  = ort_victim_ready(victim);   /* [§105] 故障**时刻**的就绪位 */
 
     __atomic_store_n(&s->seq, n, __ATOMIC_RELEASE);
   }
@@ -1233,7 +1245,8 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
  *     改动任意一处必须同步另一处（等后续合并成公共 post 函数时收回）。
  ****************************************************************************/
 
-void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code)
+void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code,
+                           uint32_t ready)
 {
   union sigval value;
   int ret;
@@ -1262,6 +1275,8 @@ void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code)
     s->faults = 0;
     s->kind   = 1;      /* EXIT */
     s->code   = code;
+    s->ready  = ready;  /* [§105] 退出**时刻**的就绪位（调用者当场取，
+                         *   此刻 tcb 可能已亡 —— 不能像 FAULT 那样现查） */
 
     __atomic_store_n(&s->seq, n, __ATOMIC_RELEASE);
   }
