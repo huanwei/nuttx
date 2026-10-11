@@ -37,8 +37,10 @@
 #include <errno.h>
 
 #include <nuttx/mqueue.h>
+#include <nuttx/sched.h>
 #include <nuttx/fs/fs.h>
 
+#include "sched/sched.h"     /* [§106] this_task() 在内部头（同 fs_open.c） */
 #include "inode/inode.h"
 #include "mqueue/mqueue.h"
 #include "vfs/vfs.h"
@@ -252,6 +254,26 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
           goto errout_with_inode;
         }
 
+#ifdef CONFIG_ORT_CONTAINER
+      /* [ORT §106] IPC 面第一刀：容器不得打开**全局** mqueue（两 SKU
+       * 共享的 /var/mqueue 命名空间 —— 跨容器/监督者可达）。闸位在
+       * **解析后**（与 §101/§104 设备面同构）：A 侧容器被路径层重挂
+       * 挡在 inode_find（ENOENT），根本走不到这里；M 绑域容器是实弹面
+       * （闸前预跑实证 open=OK——缺口在案）。 */
+
+      {
+        FAR struct tcb_s *ort_rtcb = this_task();
+
+        if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
+            (ort_rtcb->group->tg_ort_re_root ||
+             ort_rtcb->group->tg_ort_domain != 0))
+          {
+            ret = -EPERM;
+            goto errout_with_inode;
+          }
+      }
+#endif
+
       /* It exists and is a message queue.  Check if the caller wanted to
        * create a new mqueue with this name.
        */
@@ -283,6 +305,23 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
           ret = -ENOENT;
           goto errout_with_lock;
         }
+
+#ifdef CONFIG_ORT_CONTAINER
+      /* [ORT §106] 创建侧同闸（第一刀 = 容器全拒绝，创建与打开一体；
+       * 按实例发前缀 = 后续刀）。闸在解析后：A 侧容器先被路径层挡。 */
+
+      {
+        FAR struct tcb_s *ort_rtcb = this_task();
+
+        if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
+            (ort_rtcb->group->tg_ort_re_root ||
+             ort_rtcb->group->tg_ort_domain != 0))
+          {
+            ret = -EPERM;
+            goto errout_with_lock;
+          }
+      }
+#endif
 
       /* Create an inode in the pseudo-filesystem at this path */
 

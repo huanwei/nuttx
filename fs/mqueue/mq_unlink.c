@@ -33,7 +33,9 @@
 #include <errno.h>
 
 #include <nuttx/mqueue.h>
+#include <nuttx/sched.h>
 
+#include "sched/sched.h"     /* [§106] this_task() 在内部头（同 fs_open.c） */
 #include "inode/inode.h"
 #include "mqueue/mqueue.h"
 #include "vfs/vfs.h"
@@ -134,6 +136,23 @@ int file_mq_unlink(FAR const char *mq_name)
       ret = -ENXIO;
       goto errout_with_inode;
     }
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §106] IPC 面第一刀：容器不得**删除**全局 mqueue（与 mq_open
+   * 同闸同谓词；解析后闸位，A 侧被路径层先行挡掉）。 */
+
+  {
+    FAR struct tcb_s *ort_rtcb = this_task();
+
+    if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
+        (ort_rtcb->group->tg_ort_re_root ||
+         ort_rtcb->group->tg_ort_domain != 0))
+      {
+        ret = -EPERM;
+        goto errout_with_inode;
+      }
+  }
+#endif
 
   /* Refuse to unlink the inode if it has children.  I.e., if it is
    * functioning as a directory and the directory is not empty.
