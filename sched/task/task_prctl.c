@@ -226,6 +226,21 @@ int prctl(int option, ...)
           return ort_devwl_set((pid_t)pid, list);
         }
 
+      case PR_ORT_HEARTBEAT:
+        {
+          /* [ORT §107] 监督者心跳（每轮一次）。权限在实现里统一判。 */
+
+          return ort_sup_beat();
+        }
+
+      case PR_ORT_HEARTBEAT_STOP:
+        {
+          /* [ORT §107] 监督者正常收尾：显式解除看门狗（干净退出 =
+           * 场景结束；崩溃/挂死解不了 = fail-stop 要抓的）。 */
+
+          return ort_sup_wdstop();
+        }
+
 #ifdef CONFIG_ORT_SUPERVISOR_RESET
       case PR_ORT_SUPERVISOR_RESET:
         {

@@ -425,6 +425,20 @@
  */
 #define PR_SET_ORT_DEVWL     33
 
+/* [ORT] 监督者看门狗心跳（手册 §三·补一百零七）
+ *
+ *   r = prctl(PR_ORT_HEARTBEAT);       监督者：每轮一次
+ *   r = prctl(PR_ORT_HEARTBEAT_STOP);  监督者：正常收尾时解除
+ *
+ *   语义：首次心跳武装内核侧 LPWORK 监察（500 ms 一核，3000 ms 无
+ *   心跳 → 见证行 + PANIC fail-stop —— "静默失联"与"健康"从外部
+ *   本来不可分，这是把它变成可判事实的最小机制）。注册后从不心跳
+ *   者不武装（probe 类装置只注册不跑主环）。仅已注册的监督者可调
+ *   （-EPERM）。
+ */
+#define PR_ORT_HEARTBEAT        34
+#define PR_ORT_HEARTBEAT_STOP   35
+
 /* [ORT] 容器故障通知信号
  *
  * 为什么用 SIGUSR1：CONFIG_SIG_SIGUSR1_ACTION 默认为 n，

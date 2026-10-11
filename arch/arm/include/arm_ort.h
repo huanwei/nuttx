@@ -46,6 +46,12 @@ int ort_container_bind(pid_t pid, int domain);
 
 int ort_devwl_set(pid_t pid, FAR const char *userlist);
 
+/* [§107] 监督者看门狗心跳/停止（实现见 arch/arm/src/common/arm_ortcommon.c；
+ * 原型常量 500 ms 周期 / 3000 ms 超时 → 见证 + PANIC fail-stop）。 */
+
+int ort_sup_beat(void);
+int ort_sup_wdstop(void);
+
 /* 查询容器的域。未绑定返回 -1。 */
 
 int ort_container_domain(FAR struct task_group_s *group);

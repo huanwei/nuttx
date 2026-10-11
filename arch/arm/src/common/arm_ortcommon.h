@@ -41,6 +41,12 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
+/* [§107] 监督者看门狗：心跳（首跳武装 LPWORK 周期监察，3 s 静默 →
+ * 见证 + PANIC fail-stop）；停止（正常收尾显式解除）。均仅监督者可调。 */
+
+int ort_sup_beat(void);
+int ort_sup_wdstop(void);
+
 /* 作废某个域的状态槽（域号，不是编码值；-1 表示未绑定，会被忽略）。
  * 由 ort_fault_notify() 在容器故障时调用 —— 故障重启必须是冷启动。 */
 

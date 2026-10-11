@@ -33,6 +33,7 @@
 #include <nuttx/clock.h>
 #include <nuttx/signal.h>
 #include <nuttx/semaphore.h>
+#include <nuttx/wqueue.h>       /* [§107] 看门狗监察跑在 LPWORK 周期项里 */
 #include <nuttx/kmalloc.h>
 #include <nuttx/fs/fs.h>
 
@@ -1962,6 +1963,126 @@ int ort_devwl_set(pid_t pid, FAR const char *userlist)
       kmm_free(old);
     }
 
+  return OK;
+}
+
+/****************************************************************************
+ * [ORT §107] 监督者看门狗 —— **静默失联的 fail-stop**
+ *
+ *   缺口（未收口表"看门狗·静默失联"）：监督者**挂死或消失**后不再
+ *   产生任何事件 —— "此后没有故障"与"健康"从外部不可分。
+ *
+ *   机制：监督者每轮 prctl(PR_ORT_HEARTBEAT)（自增计数，仅注册的
+ *   监督者可调）；**首次心跳即武装**一个 LPWORK 周期项：每 500 ms
+ *   核对计数 —— 计数在动 ⇒ 清零停摆累计；不动满 3000 ms ⇒
+ *   打见证行 + **PANIC（fail-stop）**。与 §58 的代理心跳（CFG_ALIVE）
+ *   成对：那条管"代理→监督者"，本条管"监督者→内核"。
+ *
+ *   武装语义（原型，如实）：**首跳武装** —— 注册后从不心跳者不武装
+ *   （probe 类装置只注册不跑主环，不能被误伤）；正常收尾由监督者
+ *   显式 prctl(PR_ORT_HEARTBEAT_STOP) 解除（干净退出 = 场景结束；
+ *   崩溃/挂死 = 解不了 = 恰是 fail-stop 要抓的）。产品化：硬件 WDT
+ *   接管，注册即武装 + 复位动作。
+ ****************************************************************************/
+
+#define ORT_WD_PERIOD_MS   500
+#define ORT_WD_TIMEOUT_MS  3000
+
+static uint32_t        g_ort_supbeats;   /* 监督者心跳计数 */
+static uint32_t        g_ort_wd_seen;    /* 监察上次看到的计数 */
+static int             g_ort_wd_stall;   /* 停摆累计（ms） */
+static bool            g_ort_wd_armed;
+static bool            g_ort_wd_fired;
+static struct work_s   g_ort_wd_work;
+
+static void ort_wd_poll(FAR void *arg)
+{
+  irqstate_t flags;
+  uint32_t   beats;
+
+  flags = up_irq_save();
+
+  beats = g_ort_supbeats;
+  if (beats != g_ort_wd_seen)
+    {
+      g_ort_wd_seen  = beats;
+      g_ort_wd_stall = 0;
+    }
+  else
+    {
+      g_ort_wd_stall += ORT_WD_PERIOD_MS;
+    }
+
+  if (g_ort_wd_stall >= ORT_WD_TIMEOUT_MS)
+    {
+      g_ort_wd_fired = true;
+      up_irq_restore(flags);
+
+      _err("ORT: 看门狗超时 —— 监督者静默失联（%d ms 无心跳）"
+           "→ fail-stop\n", ORT_WD_TIMEOUT_MS);
+      PANIC();
+    }
+
+  if (g_ort_wd_armed && !g_ort_wd_fired)
+    {
+      up_irq_restore(flags);
+      (void)work_queue(LPWORK, &g_ort_wd_work, ort_wd_poll, NULL,
+                       MSEC2TICK(ORT_WD_PERIOD_MS));
+      return;
+    }
+
+  up_irq_restore(flags);
+}
+
+int ort_sup_beat(void)
+{
+  irqstate_t flags;
+  bool       arm = false;
+
+  if (ort_supervisor_pid() < 0 ||
+      nxsched_self()->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  flags = up_irq_save();
+
+  g_ort_supbeats++;
+
+  if (!g_ort_wd_armed)
+    {
+      g_ort_wd_armed = true;
+      arm            = true;
+    }
+
+  up_irq_restore(flags);
+
+  if (arm)
+    {
+      g_ort_wd_seen  = g_ort_supbeats;
+      g_ort_wd_stall = 0;
+      (void)work_queue(LPWORK, &g_ort_wd_work, ort_wd_poll, NULL,
+                       MSEC2TICK(ORT_WD_PERIOD_MS));
+    }
+
+  return OK;
+}
+
+int ort_sup_wdstop(void)
+{
+  irqstate_t flags;
+
+  if (ort_supervisor_pid() < 0 ||
+      nxsched_self()->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  flags = up_irq_save();
+  g_ort_wd_armed = false;
+  up_irq_restore(flags);
+
+  (void)work_cancel(LPWORK, &g_ort_wd_work);
   return OK;
 }
 
