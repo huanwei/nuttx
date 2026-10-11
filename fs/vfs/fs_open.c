@@ -133,6 +133,32 @@ static int file_vopen(FAR struct file *filep, FAR const char *path,
       return -ELOOP;
     }
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §101] 设备面第一刀（devacl）：容器任务不得**打开**设备节点
+   * （字符/块/MTD）。"容器"谓词与 §96③/§99 同源（设根或绑域）——
+   * 两层防御的分工：
+   *   · 路径层（§86 root）：绝对路径重挂 ⇒ A 侧容器够不着 /dev；
+   *     但 M 绑域容器**没有 root**，路径层对它们不设防（实弹面，两
+   *     SKU 预跑实证：绑域臂 console/null/zero 全 OK）。
+   *   · 对象层（本闸）：按解析后的 inode 判设备类 ⇒ 两 SKU 同闸。
+   * 第一刀 = 全拒绝（白名单按 manifest 发设备 = 产品化）；stdio 等
+   * **已打开**的 fd 不经此处（继承面 —— 见手册 §101 边界）。
+   */
+
+  if (INODE_IS_DRIVER(inode) || INODE_IS_BLOCK(inode) || INODE_IS_MTD(inode))
+    {
+      FAR struct tcb_s *ort_rtcb = this_task();
+
+      if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
+          (ort_rtcb->group->tg_ort_re_root ||
+           ort_rtcb->group->tg_ort_domain != 0))
+        {
+          ret = -EPERM;
+          goto errout_with_inode;
+        }
+    }
+#endif
+
 #if defined(CONFIG_BCH) && \
     !defined(CONFIG_DISABLE_MOUNTPOINT) && \
     !defined(CONFIG_DISABLE_PSEUDOFS_OPERATIONS)
