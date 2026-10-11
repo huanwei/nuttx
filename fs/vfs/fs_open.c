@@ -48,6 +48,93 @@
  * Private Functions
  ****************************************************************************/
 
+#ifdef CONFIG_ORT_CONTAINER
+/****************************************************************************
+ * Name: ort_devwl_allows
+ *
+ * Description:
+ *   [§104] 设备白名单匹配：容器组打开**设备节点**时查本组名单
+ *  （tg_ort_devwl，监督者经 PR_SET_ORT_DEVWL 下发的逗号分隔路径）。
+ *   匹配粒度 = **节点名末段**（名单里 "/dev/null" 取 "null" 与
+ *   inode->i_name 比对）—— 原型粒度，如实：NuttX 无 dev_t 模型，
+ *   末段名是最近的可判事实；容器在本模型里也无法自造设备节点。
+ *
+ *   无名单 / 空名单 = **全拒绝**（§101 第一刀语义保持）。
+ *   比对在临界区内完成 —— 与 ort_devwl_set 的换名（临界区内）/
+ *   释放（临界区外）三边同锁，读侧不会碰到已释放的串。
+ ****************************************************************************/
+
+static bool ort_devwl_allows(FAR struct task_group_s *group,
+                             FAR struct inode *inode)
+{
+  FAR const char *list;
+  FAR const char *p;
+  size_t nlen;
+  bool ok = false;
+  irqstate_t flags;
+
+  nlen = strlen(inode->i_name);
+
+  flags = enter_critical_section();
+  list = group->tg_ort_devwl;
+
+  if (list != NULL && list[0] != '\0')
+    {
+      p = list;
+
+      while (*p != '\0')
+        {
+          FAR const char *e = p;
+          FAR const char *b;
+          FAR const char *q;
+          size_t l;
+
+          while (*e != '\0' && *e != ',')
+            {
+              e++;
+            }
+
+          /* 末段 = 最后一个 '/' 之后 */
+
+          b = p;
+          for (q = p; q < e; q++)
+            {
+              if (*q == '/')
+                {
+                  b = q + 1;
+                }
+            }
+
+          l = (size_t)(e - b);
+
+          /* 去头/尾空格 */
+
+          while (l > 0 && *b == ' ')
+            {
+              b++;
+              l--;
+            }
+
+          while (l > 0 && b[l - 1] == ' ')
+            {
+              l--;
+            }
+
+          if (l > 0 && l == nlen && strncmp(b, inode->i_name, l) == 0)
+            {
+              ok = true;
+              break;
+            }
+
+          p = (*e == ',') ? e + 1 : e;
+        }
+    }
+
+  leave_critical_section(flags);
+  return ok;
+}
+#endif
+
 /****************************************************************************
  * Name: file_vopen
  *
@@ -134,15 +221,15 @@ static int file_vopen(FAR struct file *filep, FAR const char *path,
     }
 
 #ifdef CONFIG_ORT_CONTAINER
-  /* [ORT §101] 设备面第一刀（devacl）：容器任务不得**打开**设备节点
-   * （字符/块/MTD）。"容器"谓词与 §96③/§99 同源（设根或绑域）——
+  /* [ORT §101/§104] 设备面（devacl）：容器任务**打开**设备节点
+   * （字符/块/MTD）按本组**白名单**放行 —— §101 第一刀 = 全拒绝；
+   * §104 起：监督者经 PR_SET_ORT_DEVWL 下发名单后按名单放行（无名单
+   * 仍全拒绝）。"容器"谓词与 §96③/§99 同源（设根或绑域）——
    * 两层防御的分工：
    *   · 路径层（§86 root）：绝对路径重挂 ⇒ A 侧容器够不着 /dev；
-   *     但 M 绑域容器**没有 root**，路径层对它们不设防（实弹面，两
-   *     SKU 预跑实证：绑域臂 console/null/zero 全 OK）。
+   *     但 M 绑域容器**没有 root**，路径层对它们不设防（实弹面）。
    *   · 对象层（本闸）：按解析后的 inode 判设备类 ⇒ 两 SKU 同闸。
-   * 第一刀 = 全拒绝（白名单按 manifest 发设备 = 产品化）；stdio 等
-   * **已打开**的 fd 不经此处（继承面 —— 见手册 §101 边界）。
+   * stdio 等**已打开**的 fd 不经此处（继承面 —— 见手册 §101 边界）。
    */
 
   if (INODE_IS_DRIVER(inode) || INODE_IS_BLOCK(inode) || INODE_IS_MTD(inode))
@@ -151,7 +238,8 @@ static int file_vopen(FAR struct file *filep, FAR const char *path,
 
       if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
           (ort_rtcb->group->tg_ort_re_root ||
-           ort_rtcb->group->tg_ort_domain != 0))
+           ort_rtcb->group->tg_ort_domain != 0) &&
+          !ort_devwl_allows(ort_rtcb->group, inode))
         {
           ret = -EPERM;
           goto errout_with_inode;

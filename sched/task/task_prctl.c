@@ -33,6 +33,7 @@
 #include <nuttx/debug.h>
 
 #include <nuttx/sched.h>
+#include <arch/arm_ort.h>
 
 #include "sched/sched.h"
 #include "task/task.h"
@@ -211,6 +212,18 @@ int prctl(int option, ...)
           FAR char *buf = (FAR char *)va_arg(ap, uintptr_t);
 
           return ort_root_get(buf, (size_t)va_arg(ap, int));
+        }
+
+      case PR_SET_ORT_DEVWL:
+        {
+          /* [ORT §104] 设备白名单下发：prctl(PR_SET_ORT_DEVWL, pid, list)。
+           *   权限（仅监督者）与 copyin/换名都在 ort_devwl_set 里做 ——
+           *   sched/ 不需要知道"谁算监督者"。 */
+
+          int pid = va_arg(ap, int);
+          FAR const char *list = (FAR const char *)va_arg(ap, uintptr_t);
+
+          return ort_devwl_set((pid_t)pid, list);
         }
 
 #ifdef CONFIG_ORT_SUPERVISOR_RESET

@@ -411,6 +411,20 @@
 #define PR_GET_ORT_CFG_TICK  19
 #define PR_ORT_CFG_GET       20
 
+/* [ORT] 设备白名单下发（手册 §三·补一百零四）
+ *
+ *   r = prctl(PR_SET_ORT_DEVWL, pid_t pid, const char *list);
+ *
+ *   语义：给**容器组**（按 pid）设置允许打开的**设备节点**白名单 ——
+ *   `list` 为逗号分隔的设备路径（如 "/dev/null,/dev/zero"），匹配按
+ *   **节点名末段**（"null"/"zero"）；空串 = 清空 = **全拒绝**（§101
+ *   第一刀的默认语义）。未下发过的组同样是全拒绝。
+ *
+ *   权限：只有 ORT 监督者能调用（-EPERM）—— 与绑域同一理由：容器
+ *   自选白名单等于自解隔离闸。内核持有字符串副本（组销毁时释放）。
+ */
+#define PR_SET_ORT_DEVWL     33
+
 /* [ORT] 容器故障通知信号
  *
  * 为什么用 SIGUSR1：CONFIG_SIG_SIGUSR1_ACTION 默认为 n，

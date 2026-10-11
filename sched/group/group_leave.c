@@ -291,6 +291,15 @@ void group_drop(FAR struct task_group_s *group)
           kmm_free(group->tg_ort_root);
           group->tg_ort_root = NULL;
         }
+
+      /* [§104] 设备白名单串同样随组持有、随组释放（与 root 独立 ——
+       * 组可以不设根而只有白名单）。 */
+
+      if (group->tg_ort_devwl != NULL)
+        {
+          kmm_free(group->tg_ort_devwl);
+          group->tg_ort_devwl = NULL;
+        }
 #endif
 
       /* Release the group container itself */

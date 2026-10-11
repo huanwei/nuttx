@@ -41,6 +41,11 @@ struct task_group_s;
 
 int ort_container_bind(pid_t pid, int domain);
 
+/* [§104] 设备白名单下发：入参是**用户指针**（内部 copyin + 换名）。
+ * 只有监督者能调用，否则 -EPERM；空串 = 清空（全拒绝）。 */
+
+int ort_devwl_set(pid_t pid, FAR const char *userlist);
+
 /* 查询容器的域。未绑定返回 -1。 */
 
 int ort_container_domain(FAR struct task_group_s *group);

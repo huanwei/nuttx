@@ -1868,4 +1868,86 @@ int ort_root_get(FAR char *buf, size_t len)
   return (int)n;
 }
 
+/****************************************************************************
+ * Name: ort_devwl_set
+ *
+ * Description:
+ *   [§104] 设备白名单下发（仅监督者）：给目标容器组设置允许打开的
+ *   设备节点名单（逗号分隔；匹配按**节点名末段**，见 fs_open 的闸）。
+ *   空串 = 清空 = 全拒绝（§101 第一刀的默认语义；未下发过同样全拒绝）。
+ *
+ *   入参是**用户指针** —— 经 ort_copyin_path 逐页过闸拷入（与设根
+ *   同一条通道）。换名在临界区内完成、旧串临界区外释放；读侧
+ *   （fs_open 的匹配）也在临界区里比对 —— 三边同锁，不会读到已释放
+ *   的串。
+ ****************************************************************************/
+
+#define ORT_DEVWL_MAX 128
+
+int ort_devwl_set(pid_t pid, FAR const char *userlist)
+{
+  FAR struct tcb_s *tcb;
+  FAR struct task_group_s *group;
+  FAR char *dup = NULL;
+  FAR char *old;
+  char kbuf[ORT_DEVWL_MAX + 1];
+  irqstate_t flags;
+  int ret;
+
+  /* 只有监督者能发白名单（与绑域同一理由：容器自选白名单 = 自解闸）。 */
+
+  if (nxsched_self()->pid != ort_supervisor_pid())
+    {
+      return -EPERM;
+    }
+
+  ret = ort_copyin_path(userlist, kbuf, sizeof(kbuf));
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (kbuf[0] != '\0')
+    {
+      /* 本版本无 kmm_strdup —— 与 §86 的 root 传播同款（malloc+memcpy）。 */
+
+      size_t blen = strlen(kbuf) + 1;
+
+      dup = kmm_malloc(blen);
+      if (dup == NULL)
+        {
+          return -ENOMEM;
+        }
+
+      memcpy(dup, kbuf, blen);
+    }
+
+  flags = enter_critical_section();
+
+  tcb = nxsched_get_tcb(pid);
+  if (tcb == NULL || tcb->group == NULL)
+    {
+      leave_critical_section(flags);
+      if (dup != NULL)
+        {
+          kmm_free(dup);
+        }
+
+      return -ESRCH;
+    }
+
+  group = tcb->group;
+  old = group->tg_ort_devwl;
+  group->tg_ort_devwl = dup;
+
+  leave_critical_section(flags);
+
+  if (old != NULL)
+    {
+      kmm_free(old);
+    }
+
+  return OK;
+}
+
 #endif /* CONFIG_ORT_CONTAINER */

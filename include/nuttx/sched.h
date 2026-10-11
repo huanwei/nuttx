@@ -544,7 +544,7 @@ struct task_group_s
                                      *   PR_SET_ORT_ROOT 设在**自己组的
                                      *   派生面**上；binfmt 传播到新组时置
                                      *   tg_ort_re_root=真。字符串由组持有
-                                     *   （kmm_strdup），组销毁时释放。 */
+                                     *   （kmm_malloc），组销毁时释放。 */
   bool    tg_ort_re_root;           /* [§86] 本组是否执行重挂。只由 binfmt
                                      *   派生传播置位 —— 设根者自己**不**重挂
                                      *   （监督者还要访问全局路径）。 */
@@ -556,6 +556,13 @@ struct task_group_s
                                      *   设根者派生（§102 起每容器一个
                                      *   命名空间；此前按 root 串共享，已
                                      *   被取代）。成员间的号解析按它匹配。 */
+  FAR char *tg_ort_devwl;           /* [§104] 设备白名单（监督者经
+                                     *   PR_SET_ORT_DEVWL 下发；逗号分隔的
+                                     *   设备路径，匹配按节点名末段）。NULL/空
+                                     *   = **全拒绝**（§101 第一刀语义）。
+                                     *   串由组持有（kmm_malloc），组销毁时
+                                     *   释放；换名/释放与 fs_open 的比对在
+                                     *   同一个临界区语义下三边同锁。 */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD
