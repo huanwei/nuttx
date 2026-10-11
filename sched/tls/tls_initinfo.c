@@ -76,7 +76,23 @@ int tls_init_info(FAR struct tcb_s *tcb)
 
   /* Thread ID */
 
-  info->tl_tid = tcb->pid;
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §102] 容器**主线程**的 gettid 视图 = 组本地号（Linux 口径
+   * tid==pid；容器 init getpid=gettid=1）。pthread 线程不在此虚拟化
+   * （线程号面仍全局 —— 边界如实，与 tgkill 的 tid 面一起留后续刀）。
+   * 落点在此的原因：knsh 用户态 gettid() = 读 TLS tl_tid（一处咽喉）；
+   * 本函数对 pthread 也调用（pthread_create.c）——故必须排除 pthread。 */
+
+  if (tcb->group != NULL && tcb->group->tg_ort_lpid != 0 &&
+      (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
+    {
+      info->tl_tid = (pid_t)tcb->group->tg_ort_lpid;
+    }
+  else
+#endif
+    {
+      info->tl_tid = tcb->pid;
+    }
 
   /* Initialize the starting address of argv to NULL to prevent
    * it from being misused.

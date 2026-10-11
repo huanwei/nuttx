@@ -150,12 +150,23 @@ int nxtask_init(FAR struct tcb_s *tcb, const char *name, int priority,
       tcb->group->tg_ort_root    = root;
       tcb->group->tg_ort_re_root = true;
 
-      /* [ORT §98] 容器 pid 命名空间（自省面第一刀）：本组取本地号；
-       * 用户态 getpid 读 tg_info->ta_pid（组创建时填的全局号）——
-       * 这里**改写为本地号**。表满（join 返回 0）按全局语义降级。 */
+      /* [ORT §98/§102] 容器 pid 命名空间：本组取本地号；用户态 getpid
+       * 读 tg_info->ta_pid —— 由 group_initialize 收尾落定（见其注释）。
+       * §102 起按**实例**组织：
+       *   · 父在实例内（re_root）⇒ 继承父实例（内部 spawn 照旧）；
+       *   · 父是设根者自己（root 在、re_root 假）⇒ **新实例**（本组即
+       *     容器 entrypoint，恒取本地 1 —— 同 root 并发多容器各自 1）。
+       * 表满返回 0 ⇒ 按全局语义降级（fail-open，不制造半隔离）。 */
 
-      tcb->group->tg_ort_lpid = ort_pidns_join(root);
-      /* ta_pid 的落点在 group_initialize（收尾权威点）——见其注释 */
+      if (this_task()->group->tg_ort_re_root)
+        {
+          tcb->group->tg_ort_nsid = this_task()->group->tg_ort_nsid;
+          tcb->group->tg_ort_lpid = ort_pidns_join(tcb->group->tg_ort_nsid);
+        }
+      else
+        {
+          tcb->group->tg_ort_lpid = ort_pidns_new(&tcb->group->tg_ort_nsid);
+        }
 
     }
 #endif

@@ -608,12 +608,15 @@ static inline_function int nxsched_select_cpu(cpu_set_t affinity)
 }
 #  endif
 #ifdef CONFIG_ORT_CONTAINER
-/* [ORT §98] 容器 pid 命名空间（自省面第一刀，见 sched/task/ort_pidns.c） */
-uint32_t ort_pidns_join(FAR const char *root);
-void     ort_pidns_put(FAR const char *root);
+/* [ORT §98/§102] 容器 pid 命名空间（见 sched/task/ort_pidns.c）——
+ * §102 起按**实例号**（tg_ort_nsid）组织：设根者派生=新实例、
+ * 成员派生=加入父实例。 */
+uint32_t ort_pidns_new(FAR uint32_t *nsid_out);
+uint32_t ort_pidns_join(uint32_t nsid);
+void     ort_pidns_put(uint32_t nsid);
 pid_t    ort_pid_resolve(pid_t pid);
 
-/* [ORT §99] 第二刀：号回传本地化（spawn 活体查表 / waitpid 见证号） */
+/* [ORT §99] 号回传本地化（spawn 活体查表 / waitpid 见证号） */
 pid_t    ort_pid_localize(pid_t gpid);
 pid_t    ort_wait_localize(pid_t gpid, uint32_t lpid);
 

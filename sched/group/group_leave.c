@@ -278,14 +278,14 @@ void group_drop(FAR struct task_group_s *group)
 
       if (group->tg_ort_root != NULL)
         {
-          /* [ORT §99] 只有**入过**命名空间的组（join 过，lpid≠0）才配对
-           * 退引用 —— 设根者自己（orting：带 root 传播给孩子、但从未
-           * join）若在此 put，会在容器还活着时把 refs 减到 0 把命名空间
-           * 拆掉（lpid 复用 → 跨容器号串扰）。 */
+          /* [ORT §99] 只有**入过**命名空间的组（lpid≠0）才配对退引用
+           * —— 设根者自己（orting：带 root 传播给孩子、但从未入实例）
+           * 若在此 put，会在容器还活着时把 refs 减到 0 把命名空间拆掉。
+           * §102 起实例键 = tg_ort_nsid。 */
 
           if (group->tg_ort_lpid != 0)
             {
-              ort_pidns_put(group->tg_ort_root);   /* [§98] 先退命名空间 */
+              ort_pidns_put(group->tg_ort_nsid);   /* [§98/§102] 先退命名空间 */
             }
 
           kmm_free(group->tg_ort_root);
