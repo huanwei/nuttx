@@ -73,6 +73,13 @@ void arm_sigdeliver(void)
 
   board_autoled_on(LED_SIGNAL);
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §100] 投递开始标记（此处 IRQ 仍关 —— 先于任何可被抢占点）。
+   * PendSV 钩子（arm_doirq.c）见 active 即跳过重排，防双重进入。 */
+
+  rtcb->ort_sd_active = true;
+#endif
+
   sinfo("rtcb=%p sigdeliver=%p sigpendactionq.head=%p\n",
         rtcb, rtcb->sigdeliver, rtcb->sigpendactionq.head);
   DEBUGASSERT(rtcb->sigdeliver != NULL);
@@ -155,6 +162,18 @@ retry:
    */
 
   rtcb->sigdeliver = NULL;  /* Allows next handler to be scheduled */
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §100] 投递结束：清标记；跳过见证罕见打印（在投递之后、非 ISR
+   * 上下文；syslog 走轮询输出，IRQ 关时安全 —— 同"Resuming"惯例）。 */
+
+  rtcb->ort_sd_active = false;
+  if (rtcb->ort_sd_skips != 0)
+    {
+      sinfo("ORT: sigaction 重排跳过（投递中命中）n=%u\n",
+            (unsigned int)rtcb->ort_sd_skips);
+      rtcb->ort_sd_skips = 0;
+    }
+#endif
 
   /* Then restore the correct state for this thread of
    * execution.

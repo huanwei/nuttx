@@ -89,9 +89,27 @@ uint32_t *arm_doirq(int irq, uint32_t *regs)
 #ifdef CONFIG_ENABLE_ALL_SIGNALS
       if (tcb->sigdeliver)
         {
-          /* Pendsv able to access running tcb with no critical section */
+#ifdef CONFIG_ORT_CONTAINER
+          /* [ORT §100] 投递中不得重排 —— 任务正在 sigdeliver trampoline
+           * 里时，它按中断点续跑即可；重排会把 xcp 重写成"跳回 trampoline
+           * 入口"（双重进入），被放弃那趟留下硬件异常帧（布局与 xcp 帧
+           * 不同），尾段恢复即 INVSTATE（an500 实锤：同 head 双进入
+           * 2/2 崩、16 绿轮 0 次）。命中只计数（ISR 禁打印），尾部见证。 */
 
-          up_schedule_sigaction(tcb);
+          if (tcb->ort_sd_active)
+            {
+              if (tcb->ort_sd_skips != 0xff)
+                {
+                  tcb->ort_sd_skips++;
+                }
+            }
+          else
+#endif
+            {
+              /* Pendsv able to access running tcb with no critical section */
+
+              up_schedule_sigaction(tcb);
+            }
         }
 
 #endif

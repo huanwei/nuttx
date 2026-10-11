@@ -724,6 +724,26 @@ struct tcb_s
   sq_queue_t sigpendactionq;             /* List of pending signal actions  */
   sq_queue_t sigpostedq;                 /* List of posted signals          */
 #endif /* CONFIG_ENABLE_ALL_SIGNALS*/
+#ifdef CONFIG_ORT_CONTAINER
+  /* [ORT §100] sigdeliver trampoline 执行中标记 + 重排跳过见证。
+   *
+   *   active：arm_sigdeliver 入口置位、尾部清零。armv7-m/armv8-m 的
+   *   PendSV 钩子（arm_doirq.c：`if (tcb->sigdeliver) up_schedule_sigaction`）
+   *   在 active 时**跳过重排** —— 重排 = 把 xcp 重写成"跳回 trampoline
+   *   入口"（双重进入）；被放弃那趟在其栈上留下的是**硬件异常帧**，
+   *   与 xcp 帧布局不同，尾段按 xcp 恢复即 INVSTATE（an500 实锤：
+   *   同 head 双进入 2/2 崩、16 绿轮 0 次 —— 绑定 18/18）。
+   *   投递中的任务本来就按中断点续跑，不需要这里重排。
+   *
+   *   skips：ISR 里只自增（绝不打印）；尾部罕见打印并清零 —— 见证
+   *   "投递中命中"这条路被走到且被安全跳过。
+   *
+   *   初值：tcb 经 kmm_zalloc（task_create/exec_module）或静态零初始化
+   *   （内核线程，从不进 trampoline）—— 0 即"未投递"，天然正确。 */
+
+  bool    ort_sd_active;
+  uint8_t ort_sd_skips;
+#endif
 #ifndef CONFIG_DISABLE_ALL_SIGNALS
   sigset_t   sigprocmask;                /* Signals that are blocked        */
   sigset_t   sigwaitmask;                /* Waiting for pending signals     */
