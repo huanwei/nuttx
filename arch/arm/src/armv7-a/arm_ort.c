@@ -321,6 +321,7 @@ int ort_container_domain(FAR struct task_group_s *group)
 int ort_container_bind(pid_t pid, int domain)
 {
   FAR struct tcb_s *tcb;
+  int ret;
 
   if (nxsched_self()->pid != ort_supervisor_pid())
     {
@@ -358,6 +359,18 @@ int ort_container_bind(pid_t pid, int domain)
    *   编码沿用 tg_ort_domain 的既有契约（0 = 未绑定，域 n 存为 n+1），
    *   与 MPU 侧完全一致 —— 见 include/nuttx/sched.h 里那段说明。
    */
+
+  /* [§114] 新实例（尚未绑域）绑定前清旧实例的 mqueue 域键命名空间；
+   * rebind 不动。失败 → fail-closed，不完成绑定。 */
+
+  if (tcb->group->tg_ort_domain == 0)
+    {
+      ret = ort_ipc_purge_domain(domain);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
 
   tcb->group->tg_ort_domain = (uint8_t)(domain + 1);
   return OK;

@@ -28,10 +28,12 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <mqueue.h>
 #include <assert.h>
 #include <errno.h>
 
+#include <nuttx/debug.h>
 #include <nuttx/mqueue.h>
 #include <nuttx/sched.h>
 
@@ -259,4 +261,98 @@ int mq_unlink(FAR const char *mq_name)
     }
 
   return OK;
+}
+
+/****************************************************************************
+ * Name: nxmq_purge_prefix
+ *
+ * Description:
+ *   [ORT §114] 删除 /var/mqueue 下所有以 prefix 开头的队列（叶子名）。
+ *   用于实例生命周期：M 的域键在**绑域前**清掉旧实例的遗留（域键复用
+ *   ⇒ 不清理会让新实例读到旧实例的消息）。前缀由内核构造、可信；
+ *   逐名走 file_mq_unlink（与 mq_unlink 同一语义，含引用计数释放）。
+ *
+ * Returned Value:
+ *   删除条数（≥0）；失败返回负 errno（调用者 fail-closed）。
+ *
+ ****************************************************************************/
+
+int nxmq_purge_prefix(FAR const char *prefix)
+{
+  struct inode_search_s desc;
+  char name[CONFIG_NAME_MAX + 1];
+  size_t plen;
+  int n = 0;
+
+  if (prefix == NULL || *prefix == '\0')
+    {
+      return -EINVAL;
+    }
+
+  plen = strlen(prefix);
+
+  for (;;)
+    {
+      FAR struct inode *dir;
+      FAR struct inode *child;
+      bool found = false;
+      int ret;
+
+      SETUP_SEARCH(&desc, CONFIG_FS_MQUEUE_VFS_PATH, false);
+      desc.global = true;
+
+      ret = inode_find(&desc);
+      if (ret == -ENOENT)
+        {
+          /* 命名空间尚不存在（本启动还没建过任何队列）= 无可清理 */
+
+          RELEASE_SEARCH(&desc);
+          return 0;
+        }
+      else if (ret < 0)
+        {
+          RELEASE_SEARCH(&desc);
+          return ret;
+        }
+
+      dir = desc.node;
+
+      inode_lock();
+      for (child = dir->i_child; child != NULL; child = child->i_peer)
+        {
+          if (child->i_name != NULL &&
+              strlen(child->i_name) <= CONFIG_NAME_MAX &&
+              strncmp(child->i_name, prefix, plen) == 0)
+            {
+              strlcpy(name, child->i_name, sizeof(name));
+              found = true;
+              break;
+            }
+        }
+      inode_unlock();
+
+      inode_release(dir);
+      RELEASE_SEARCH(&desc);
+
+      if (!found)
+        {
+          break;
+        }
+
+      ret = file_mq_unlink(name);
+      if (ret < 0 && ret != -ENOENT)
+        {
+          _alert("ORT: mqueue ns purge failed: %s (%d)\n", name, ret);
+          return ret;
+        }
+
+      n++;
+    }
+
+  if (n > 0)
+    {
+      _alert("ORT: mqueue ns purge: %s (%d)\n", prefix, n);
+    }
+
+  return n;
 }

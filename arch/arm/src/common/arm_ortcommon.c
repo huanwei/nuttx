@@ -36,6 +36,8 @@
 #include <nuttx/wqueue.h>       /* [§107] 看门狗监察跑在 LPWORK 周期项里 */
 #include <nuttx/kmalloc.h>
 #include <nuttx/fs/fs.h>
+#include <nuttx/mqueue.h>       /* [§114] nxmq_purge_prefix */
+#include <stdio.h>
 
 #include "arm_ortcommon.h"
 
@@ -1404,6 +1406,38 @@ int ort_wait_admission(unsigned timeout_ms)
     }
 
   return ret < 0 ? ret : -ETIMEDOUT;
+}
+
+/****************************************************************************
+ * Name: ort_ipc_purge_domain
+ *
+ * Description:
+ *   [ORT §114] 绑域前清旧实例的 mqueue 命名空间。M 的 IPC 键是**域**
+ *   （§111 `ort.d<domain+1>.`），域在 CG 重启时复用 —— 不清的话新实例
+ *   会打开旧实例遗留的同名队列（跨实例数据泄漏，实测 check=OLD）。
+ *   只在目标组**尚未绑定**时由 bind 调用（rebind 不动）。
+ *
+ ****************************************************************************/
+
+int ort_ipc_purge_domain(int domain)
+{
+  char prefix[32];
+  int ret;
+
+  if (domain < 0)
+    {
+      return -EINVAL;
+    }
+
+  snprintf(prefix, sizeof(prefix), "ort.d%d.", domain + 1);
+
+  ret = nxmq_purge_prefix(prefix);
+  if (ret < 0)
+    {
+      _alert("ORT: ipc purge domain %d failed: %d\n", domain, ret);
+    }
+
+  return ret;
 }
 
 /****************************************************************************

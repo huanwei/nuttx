@@ -197,6 +197,8 @@ int ort_container_bind(pid_t pid, int domain)
   FAR struct tcb_s *tcb;
   FAR struct task_group_s *group;
   irqstate_t flags;
+  bool was_bound;
+  int ret;
 
   /* ★ 只有监督者能绑域。
    *
@@ -253,7 +255,35 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
-  group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
+  was_bound = (group->tg_ort_domain != 0);
+
+  leave_critical_section(flags);
+
+  /* [§114] 新实例（尚未绑域）绑定前清旧实例的 mqueue 域键命名空间；
+   * rebind 不动。清理走 fs，可能睡眠 —— 必须在临界区外。失败 →
+   * fail-closed，不完成绑定。 */
+
+  if (!was_bound)
+    {
+      ret = ort_ipc_purge_domain(domain);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  /* 二次取目标再落域（清理期间目标可能已退出）。 */
+
+  flags = enter_critical_section();
+
+  tcb = nxsched_get_tcb(pid);
+  if (tcb == NULL || tcb->group == NULL)
+    {
+      leave_critical_section(flags);
+      return -ESRCH;
+    }
+
+  tcb->group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
 
   leave_critical_section(flags);
   return OK;

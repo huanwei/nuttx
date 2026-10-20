@@ -514,6 +514,20 @@ int file_mq_close(FAR struct file *mq);
 int file_mq_unlink(FAR const char *mq_name);
 
 /****************************************************************************
+ * Name: nxmq_purge_prefix
+ *
+ * Description:
+ *   [ORT §114] 删除 /var/mqueue 下所有以 prefix 开头的队列（叶子名）。
+ *   仅用于内核构造的实例前缀（域键复用前的旧实例清理）。
+ *
+ * Returned Value:
+ *   删除条数（>=0）；负 errno = 失败。
+ *
+ ****************************************************************************/
+
+int nxmq_purge_prefix(FAR const char *prefix);
+
+/****************************************************************************
  * Name: file_mq_send
  *
  * Description:

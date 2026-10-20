@@ -41,6 +41,12 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
 int ort_fault_read(FAR struct ort_faultrec_s *rec);
 
+/* [§114] 新实例绑定域之前，清掉该域键（ort.d<encoded>.）下旧实例遗留的
+ * mqueue（域键复用 ⇒ 不清会让新实例读到旧实例的消息）。返回删除条数
+ * 或负 errno（调用者 fail-closed，不完成绑定）。 */
+
+int ort_ipc_purge_domain(int domain);
+
 /* [§107] 监督者看门狗：心跳（首跳武装 LPWORK 周期监察，3 s 静默 →
  * 见证 + PANIC fail-stop）；停止（正常收尾显式解除）。均仅监督者可调。 */
 
