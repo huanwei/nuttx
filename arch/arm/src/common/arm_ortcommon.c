@@ -1334,6 +1334,41 @@ void ort_group_exit_notify(pid_t victim, uint8_t ort_domain, int code,
  *   唤醒方 = PR_SET_ORT_DOMAIN 处理器（绑定成功即 post）。
  ****************************************************************************/
 
+#ifdef CONFIG_ORT_CONTAINER
+static void ort_fdguard_sweep(FAR struct tcb_s *rtcb)
+{
+  FAR struct task_group_s *group = rtcb->group;
+  int nfd;
+  int fd;
+  int n = 0;
+
+  /* 只对**容器**做；已受门控（A 侧 spawn 已 stdio-only / 容器间派生）
+   * 的组直接跳过。 */
+
+  if (group == NULL || group->tg_ort_fdsafe ||
+      (group->tg_ort_domain == 0 && !group->tg_ort_re_root))
+    {
+      return;
+    }
+
+  nfd = fdlist_count(&group->tg_fdlist);
+  for (fd = 3; fd < nfd; fd++)
+    {
+      if (nx_close(fd) >= 0)
+        {
+          n++;
+        }
+    }
+
+  group->tg_ort_fdsafe = true;
+
+  if (n > 0)
+    {
+      _alert("ORT: fdguard: swept %d fd(s) pid=%d\n", n, rtcb->pid);
+    }
+}
+#endif
+
 int ort_wait_admission(unsigned timeout_ms)
 {
   FAR struct tcb_s *rtcb = nxsched_self();
@@ -1348,6 +1383,9 @@ int ort_wait_admission(unsigned timeout_ms)
 
   if (rtcb->group->tg_ort_domain != 0)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      ort_fdguard_sweep(rtcb);   /* [§112] M 绑域容器的 fd 收口点 */
+#endif
       return OK;
     }
 
@@ -1359,6 +1397,9 @@ int ort_wait_admission(unsigned timeout_ms)
 
   if (rtcb->group->tg_ort_domain != 0)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      ort_fdguard_sweep(rtcb);
+#endif
       return OK;
     }
 

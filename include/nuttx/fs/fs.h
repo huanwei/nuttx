@@ -993,6 +993,9 @@ int fdlist_count(FAR struct fdlist *list);
  * Description:
  *   Copy parent task's file descriptors to child task.
  *
+ *   [ORT §112] stdio_only=true 时只复制 0..2（host→容器跨越的 fd 收口；
+ *   之后的 spawn file actions 仍可显式建立其它 fd）。false = 既有语义。
+ *
  * Returned Value:
  *   Zero (OK) is returned on success; a negated errno value is returned on
  *   any failure.
@@ -1001,7 +1004,7 @@ int fdlist_count(FAR struct fdlist *list);
 
 int fdlist_copy(FAR struct fdlist *plist, FAR struct fdlist *clist,
                 FAR const posix_spawn_file_actions_t *actions,
-                bool cloexec);
+                bool cloexec, bool stdio_only);
 
 /****************************************************************************
  * Name: fdlist_get2

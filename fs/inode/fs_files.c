@@ -689,7 +689,7 @@ int file_allocate_from_inode(FAR struct inode *inode, int oflags, off_t pos,
 
 int fdlist_copy(FAR struct fdlist *plist, FAR struct fdlist *clist,
                 FAR const posix_spawn_file_actions_t *actions,
-                bool cloexec)
+                bool cloexec, bool stdio_only)
 {
   bool fcloexec;
   int ret;
@@ -719,6 +719,14 @@ int fdlist_copy(FAR struct fdlist *plist, FAR struct fdlist *clist,
               return OK;
             }
 #endif
+
+          /* [ORT §112] host→容器跨越：只复制 stdio（spawn file actions
+           * 在复制之后另行生效，仍可显式建立其它 fd）。 */
+
+          if (stdio_only && fd >= 3)
+            {
+              return OK;
+            }
 
           fdlist_get_by_index(plist, i, j, &filep, &fdp);
           if (filep == NULL)

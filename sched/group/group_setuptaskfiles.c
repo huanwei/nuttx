@@ -28,6 +28,7 @@
 
 #include <sched.h>
 #include <assert.h>
+#include <syslog.h>
 
 #include <nuttx/fs/fs.h>
 #include <nuttx/trace.h>
@@ -67,6 +68,7 @@ int group_setuptaskfiles(FAR struct tcb_s *tcb,
   int ret = OK;
 #ifndef CONFIG_FDCLONE_DISABLE
   FAR struct tcb_s *rtcb = this_task();
+  bool stdio_only = false;
 #endif
 
   sched_trace_begin();
@@ -86,8 +88,36 @@ int group_setuptaskfiles(FAR struct tcb_s *tcb,
   if (group != rtcb->group &&
       (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_KERNEL)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      /* [ORT §112] 继承 fd 收口（A 侧咽喉；M 的绑域容器在准入返回
+       * 时自清，见 ort_wait_admission）：
+       *   · 父**不**重挂、子重挂 = host→容器跨越 → 只复制 stdio
+       *     （设备/宿主文件/目录 fd 一律不跨越；stdio 是契约面）。
+       *   · 父也重挂 = 容器内部派生 → 保持完整继承（POSIX 语义）。
+       * 任一容器组复制完成后置 fdsafe，准入清扫不再重复。 */
+
+      if (group->tg_ort_re_root && !rtcb->group->tg_ort_re_root)
+        {
+          stdio_only = true;
+        }
+#endif
+
       ret = fdlist_copy(&rtcb->group->tg_fdlist,
-                        &group->tg_fdlist, actions, cloexec);
+                        &group->tg_fdlist, actions, cloexec, stdio_only);
+
+#ifdef CONFIG_ORT_CONTAINER
+      if (ret >= 0 && group->tg_ort_re_root)
+        {
+          group->tg_ort_fdsafe = true;
+
+          if (stdio_only)
+            {
+              syslog(LOG_ERR,
+                     "ORT: fdguard: stdio-only lpid=%u\n",
+                     (unsigned)group->tg_ort_lpid);
+            }
+        }
+#endif
     }
 
   if (ret >= 0 && actions != NULL &&

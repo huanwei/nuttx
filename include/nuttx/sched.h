@@ -563,6 +563,12 @@ struct task_group_s
                                      *   串由组持有（kmm_malloc），组销毁时
                                      *   释放；换名/释放与 fs_open 的比对在
                                      *   同一个临界区语义下三边同锁。 */
+  bool    tg_ort_fdsafe;            /* [§112] 本组已做**继承 fd 收口**
+                                     *   （只留 stdio）。A 根容器在 spawn
+                                     *   复制处置位；M 绑域容器在准入返回
+                                     *   时清扫并置位。容器间派生（父也是
+                                     *   容器）保留完整继承并置位 —— 那是
+                                     *   容器内部契约，不是 host→容器跨越。 */
 #endif
 
 #ifndef CONFIG_DISABLE_PTHREAD
