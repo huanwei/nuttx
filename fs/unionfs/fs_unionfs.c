@@ -135,9 +135,6 @@ static int     unionfs_trychstat(FAR struct inode *inode,
 static int     unionfs_trystatdir(FAR struct inode *inode,
                                   FAR const char *relpath,
                                   FAR const char *prefix);
-static int     unionfs_trystatfile(FAR struct inode *inode,
-                                   FAR const char *relpath,
-                                   FAR const char *prefix);
 static int     unionfs_tryreadlink(FAR struct inode *inode,
                                    FAR const char *relpath,
                                    FAR const char *prefix,
@@ -681,31 +678,6 @@ static int unionfs_trystatdir(FAR struct inode *inode,
 }
 
 /****************************************************************************
- * Name: unionfs_trystatfile
- ****************************************************************************/
-
-static int unionfs_trystatfile(FAR struct inode *inode,
-                               FAR const char *relpath,
-                               FAR const char *prefix)
-{
-  struct stat buf;
-  int ret;
-
-  /* Check if relative path refers to a regular file.  We specifically
-   * exclude directories but neither do we expect any kind of special file
-   * to reside on the mounted filesystem.
-   */
-
-  ret = unionfs_trystat(inode, relpath, prefix, &buf);
-  if (ret >= 0 && !S_ISREG(buf.st_mode))
-    {
-      return -EISDIR;
-    }
-
-  return ret;
-}
-
-/****************************************************************************
  * Name: unionfs_tryrmdir
  ****************************************************************************/
 
@@ -1142,6 +1114,295 @@ static bool unionfs_hidemarker(FAR const char *relpath)
   base = (base == NULL) ? relpath : base + 1;
 
   return strncmp(base, ".wh.", 4) == 0;
+}
+
+/****************************************************************************
+ * Name: unionfs_copyup_tree / unionfs_copyup_item
+ *
+ * Description:
+ *   [ORT §110] 目录的**递归上移**（rename 目录支持的地基）：
+ *   · item —— 下层单个项按类型上移：符号链接经下层 readlink + **上层
+ *     原始 mops** symlink 重建（unionfs 自身的 symlink mops 按 §95 语义
+ *     为 NULL —— 那是"经视图创建"的口，这里属内部簿记，直接打上层）；
+ *     目录递归；常规文件复用 §84 的 unionfs_copyup；其余 fail-closed
+ *     -ENOTSUP（OCI 层不会带设备节点）。
+ *   · tree —— 建上层目录（模式位跟随）后逐项 copyup_item；跳过标记
+ *     命名域（.wh.* —— 下层不应有，防御性跳过）。
+ *   调用者须先 unionfs_mkparents() 补齐上层父目录（与 copyup 同约定）。
+ ****************************************************************************/
+
+static int unionfs_copyup_tree(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath);
+static int unionfs_copyup_item(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath);
+
+static int unionfs_copyup_item(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR const struct mountpt_operations *uops = umu->um_node->u.i_mops;
+  FAR const char *upath;
+  FAR char *lbuf;
+  struct stat st;
+  int ret;
+
+  /* 先试链接（stat 会跟随；readlink 才看得到链接本身）——
+   * 缓冲区走堆：内核栈预算小（ARCH_KERNEL_STACKSIZE），1KB 栈数组
+   * 乘上递归层数会压穿（§110 实测：栈溢出改写内核堆里的锁 → 在
+   * tmpfs 的 rmutex 上挂死/断言）。 */
+
+  lbuf = fs_heap_malloc(UNIONFS_COPYBUFSZ);
+  if (lbuf == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  ret = unionfs_tryreadlink(uml->um_node, relpath, uml->um_prefix,
+                            lbuf, UNIONFS_COPYBUFSZ);
+  if (ret >= 0)
+    {
+      upath = unionfs_offsetpath(relpath, umu->um_prefix);
+      if (upath == NULL)
+        {
+          fs_heap_free(lbuf);
+          return -ENOENT;
+        }
+
+      if (uops->symlink == NULL)
+        {
+          fs_heap_free(lbuf);
+          return -ENOSYS;
+        }
+
+      ret = uops->symlink(umu->um_node, upath, lbuf);
+      fs_heap_free(lbuf);
+      return ret;
+    }
+
+  fs_heap_free(lbuf);
+
+  ret = unionfs_trystat(uml->um_node, relpath, uml->um_prefix, &st);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (S_ISDIR(st.st_mode))
+    {
+      return unionfs_copyup_tree(ui, relpath);
+    }
+
+  if (S_ISREG(st.st_mode))
+    {
+      return unionfs_copyup(ui, relpath);
+    }
+
+  return -ENOTSUP;
+}
+
+static int unionfs_copyup_tree(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR const struct mountpt_operations *lops = uml->um_node->u.i_mops;
+  FAR const struct mountpt_operations *uops = umu->um_node->u.i_mops;
+  FAR const char *upath;
+  FAR struct fs_dirent_s *dir = NULL;
+  FAR char *names;
+  struct dirent entry;
+  struct stat st;
+  int count;
+  int idx;
+  int ret;
+
+  upath = unionfs_offsetpath(relpath, umu->um_prefix);
+  if (upath == NULL)
+    {
+      return -ENOENT;
+    }
+
+  ret = unionfs_trystat(uml->um_node, relpath, uml->um_prefix, &st);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (!S_ISDIR(st.st_mode))
+    {
+      return -ENOTDIR;
+    }
+
+  if (uops->mkdir != NULL)
+    {
+      ret = uops->mkdir(umu->um_node, upath, st.st_mode & 0777);
+      if (ret < 0 && ret != -EEXIST)
+        {
+          return ret;
+        }
+    }
+
+  /* ★★ 两遍式：**先枚举名字并关闭目录流，再逐项上移**。
+   *
+   *   与 clearmarkers 的"开-查-关-作"同型：不在持有目录流（目录对象
+   *   引用+锁）期间对同一文件系统做打开/创建。★ 如实注记：§110 首版
+   *   挂死的**真因不是**这条（两遍式改完照样挂）；真因是 copyup_item
+   *   的 1KB 栈缓冲区乘递归层数压穿内核栈，改堆后才通。两遍式保留是
+   *   防御性写法，不是修复。 */
+
+  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  count = 0;
+  for (;;)
+    {
+      ret = lops->readdir(uml->um_node, dir, &entry);
+      if (ret < 0)
+        {
+          break;
+        }
+
+      if (strcmp(entry.d_name, ".") == 0 ||
+          strcmp(entry.d_name, "..") == 0 ||
+          unionfs_hidemarker(entry.d_name))
+        {
+          continue;
+        }
+
+      count++;
+    }
+
+  if (lops->closedir != NULL)
+    {
+      lops->closedir(uml->um_node, dir);
+    }
+
+  if (count == 0)
+    {
+      return OK;
+    }
+
+  if (count > 256)
+    {
+      /* 原型上界（fail-closed）：更大的目录 rename 不做 ——
+       * 与"一次性整树复制"的成本口径一致，如实。 */
+
+      return -ENOSPC;
+    }
+
+  names = fs_heap_malloc((size_t)count * (NAME_MAX + 1));
+  if (names == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  dir = NULL;
+  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
+  if (ret < 0)
+    {
+      fs_heap_free(names);
+      return ret;
+    }
+
+  idx = 0;
+  while (idx < count)
+    {
+      ret = lops->readdir(uml->um_node, dir, &entry);
+      if (ret < 0)
+        {
+          break;
+        }
+
+      if (strcmp(entry.d_name, ".") == 0 ||
+          strcmp(entry.d_name, "..") == 0 ||
+          unionfs_hidemarker(entry.d_name))
+        {
+          continue;
+        }
+
+      strlcpy(names + (size_t)idx * (NAME_MAX + 1), entry.d_name,
+              NAME_MAX + 1);
+      idx++;
+    }
+
+  if (lops->closedir != NULL)
+    {
+      lops->closedir(uml->um_node, dir);
+    }
+
+  ret = idx == count ? OK : -EIO;
+
+  /* 流已关 —— 现在才逐项上移 */
+
+  for (idx = 0; ret >= 0 && idx < count; idx++)
+    {
+      FAR char *child = unionfs_relpath(relpath,
+                                        names + (size_t)idx * (NAME_MAX + 1));
+
+      if (child == NULL)
+        {
+          ret = -ENOMEM;
+          break;
+        }
+
+      ret = unionfs_copyup_item(ui, child);
+      fs_heap_free(child);
+    }
+
+  fs_heap_free(names);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_dropmarker
+ *
+ * Description:
+ *   [ORT §110] 清除**单个名字**的旧 whiteout 记号（`<父>/.wh.<名>`）。
+ *   同名重建后（unlink → create / mkdir / rename 落到该名），上层已拥有
+ *   新名字、旧记号只剩簿记残留 —— 这里收掉（§85 的"同名重建旧记号
+ *   留存"边界收口）。无记号则忽略（-ENOENT 静默）。标记命名域自身
+ *   不可作 target。
+ *   ★ bind 之后层被 inode_remove 摘除，上层无法从命名空间直接看 ——
+ *   真删掉记号时打一行见证（判据靠它；否则判据只能靠"视图行为"，
+ *   而残留记号对视图不可见 = 假通过）。
+ ****************************************************************************/
+
+static void unionfs_dropmarker(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR char *marker = NULL;
+  FAR const char *slash;
+
+  if (relpath == NULL || *relpath == '\0' || unionfs_hidemarker(relpath))
+    {
+      return;
+    }
+
+  slash = strrchr(relpath, '/');
+  if (slash != NULL)
+    {
+      if (fs_heap_asprintf(&marker, "%.*s/.wh.%s",
+                           (int)(slash - relpath), relpath, slash + 1) < 0)
+        {
+          return;
+        }
+    }
+  else if (fs_heap_asprintf(&marker, ".wh.%s", relpath) < 0)
+    {
+      return;
+    }
+
+  if (unionfs_tryunlink(umu->um_node, marker, umu->um_prefix) >= 0)
+    {
+      _alert("ORT: unionfs marker cleared: %s\n", relpath);
+    }
+
+  fs_heap_free(marker);
 }
 
 /****************************************************************************
@@ -1695,6 +1956,11 @@ static int unionfs_open(FAR struct file *filep, FAR const char *relpath,
         }
 
       /* Successfully opened on file system 1 (shadow / copy-up / create) */
+
+      /* [§110] 名字在上层已就位（shadow / copy-up / 新建）—— 收掉曾经
+       * 存在的旧 whiteout 记号（同名重建的簿记残留；无记号则无操作）。 */
+
+      unionfs_dropmarker(ui, relpath);
 
       uf->uf_ndx = 0;
     }
@@ -3197,6 +3463,11 @@ static int unionfs_mkdir(FAR struct inode *mountpt, FAR const char *relpath,
       return ret;
     }
 
+  /* [§110] 同名重建：收掉名字的旧 whiteout 记号（上层目录已就位；
+   * 旧**内容**由下方 opq 标记继续屏蔽 —— 两者职责不同）。 */
+
+  unionfs_dropmarker(ui, relpath);
+
   /* [ORT §85] 重建场景（下层物理还有同名实体）：opq 标记屏蔽下层全部
    * 子项 —— 新目录是"全新"的，旧内容不得渗出。 */
 
@@ -3297,6 +3568,8 @@ static int unionfs_rename(FAR struct inode *mountpt,
 {
   FAR struct unionfs_inode_s *ui;
   FAR struct unionfs_mountpt_s *um;
+  struct stat ust_st;
+  struct stat lst_st;
   int ust;
   int lst;
   bool whited;
@@ -3323,13 +3596,29 @@ static int unionfs_rename(FAR struct inode *mountpt,
       return -EPERM;
     }
 
-  /* 视图状态：上层有源？（裸 statfile）下层有源？白障？ */
+  /* 视图状态：上层有源？下层有源？白障？
+   * ★ [§110] 探测从 trystatfile（**仅常规文件**）改为**通用 trystat** ——
+   *   否则目录源被当"视图里没有"（-EISDIR），rename 目录永远 -ENOENT。
+   *   上层目录（重建过的）同样受益。 */
 
   um     = &ui->ui_fs[0];
-  ust    = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
+  ust    = unionfs_trystat(um->um_node, oldrelpath, um->um_prefix, &ust_st);
   um     = &ui->ui_fs[1];
-  lst    = unionfs_trystatfile(um->um_node, oldrelpath, um->um_prefix);
+  lst    = unionfs_trystat(um->um_node, oldrelpath, um->um_prefix, &lst_st);
   whited = unionfs_lowerhidden(ui, oldrelpath);
+
+  /* [§110] 上层目录存在且下层同名也在（视图 = 合并态）：普通上层
+   * rename 会把"只在下层、尚未上移"的子项留在旧名（随后被白障）而
+   * 新名缺失 —— 静默丢内容。merge-copy 未实现（原型边界）→
+   * fail-closed。opq 目录整体屏蔽下层内容，不属合并态，放行。 */
+
+  if (ust >= 0 && lst >= 0 && S_ISDIR(ust_st.st_mode) &&
+      !unionfs_isopaque(ui, oldrelpath))
+    {
+      _alert("ORT: unionfs rename unsupported (merged dir): %s\n",
+             oldrelpath);
+      return -ENOTSUP;
+    }
 
   if (ust < 0)
     {
@@ -3340,13 +3629,14 @@ static int unionfs_rename(FAR struct inode *mountpt,
           return -ENOENT;
         }
 
-      /* [ORT §85] 源仅下层：copy-up 到旧名 → 上层改名 → 白障旧名
-       * （原实现把 rename 直接打在下层 = 改镜像层）。 */
+      /* [ORT §85/§110] 源仅下层：上移到旧名 → 上层改名 → 白障旧名
+       * （原实现把 rename 直接打在下层 = 改镜像层）。上移走**统一入口**：
+       * 目录递归、符号链接重建、常规文件整份复制。 */
 
       ret = unionfs_mkparents(ui, oldrelpath);
       if (ret >= 0)
         {
-          ret = unionfs_copyup(ui, oldrelpath);
+          ret = unionfs_copyup_item(ui, oldrelpath);
         }
 
       if (ret < 0)
@@ -3370,6 +3660,11 @@ static int unionfs_rename(FAR struct inode *mountpt,
     {
       return ret;
     }
+
+  /* [§110] 新名若曾被删过，收掉旧 whiteout 记号（上层新名已就位，
+   * 记号只剩簿记残留）。 */
+
+  unionfs_dropmarker(ui, newrelpath);
 
   /* 旧名下层同名仍在且未白障 → 补白障（否则改名后旧名"复活"）。 */
 
