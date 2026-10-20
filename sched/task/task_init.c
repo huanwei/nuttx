@@ -44,6 +44,48 @@
 #include "task/task.h"
 #include "tls/tls.h"
 
+#ifdef CONFIG_ORT_CONTAINER
+/* [ORT §113] 容器属性继承：父组是容器（re_root || domain≠0）时，新组
+ * 继承 domain / memcap / devwl。domain 是隔离谓词的核心 —— 失去它，
+ * 容器内派生的子组会被信号/设备/IPC 闸当成**宿主**（实弹缺口：M 容器
+ * 内 task_create 的子组 domain=-1、/dev/null 可开）。devwl 串在临界区
+ * 内拷到栈缓冲（与 ort_devwl_set 的换名/释放同锁，串长受 ORT_DEVWL_MAX
+ * 约束），临界区外再分配复制；OOM 则任务创建失败（fail-closed）。 */
+
+#define ORT_DEVWL_INHERIT_MAX 128
+
+static int ort_inherit_container_attrs(FAR struct task_group_s *parent,
+                                       FAR struct task_group_s *child)
+{
+  FAR char *dup = NULL;
+  char devbuf[ORT_DEVWL_INHERIT_MAX + 1];
+  irqstate_t flags;
+
+  flags = enter_critical_section();
+  child->tg_ort_domain = parent->tg_ort_domain;
+  child->tg_ort_memcap = parent->tg_ort_memcap;
+  strlcpy(devbuf, parent->tg_ort_devwl != NULL ? parent->tg_ort_devwl : "",
+          sizeof(devbuf));
+  leave_critical_section(flags);
+
+  if (devbuf[0] != '\0')
+    {
+      size_t blen = strlen(devbuf) + 1;
+
+      dup = kmm_malloc(blen);
+      if (dup == NULL)
+        {
+          return -ENOMEM;
+        }
+
+      memcpy(dup, devbuf, blen);
+    }
+
+  child->tg_ort_devwl = dup;
+  return OK;
+}
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -171,6 +213,23 @@ int nxtask_init(FAR struct tcb_s *tcb, const char *name, int priority,
       /* [§109] 组长的**线程本地号** = 组本地号（join/new 已定）。 */
 
       tcb->ort_ltid = tcb->group->tg_ort_lpid;
+    }
+#endif
+
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§113] 父组是容器（A 设根 / M 绑域）⇒ 新组继承容器属性。
+   * 必须在 group_setuptaskfiles 之前 —— fd 收口用 domain/re_root 判
+   * "子组是不是容器"。 */
+
+  if (this_task()->group != NULL &&
+      (this_task()->group->tg_ort_re_root ||
+       this_task()->group->tg_ort_domain != 0))
+    {
+      ret = ort_inherit_container_attrs(this_task()->group, tcb->group);
+      if (ret < 0)
+        {
+          goto errout_with_group;
+        }
     }
 #endif
 
