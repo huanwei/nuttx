@@ -57,6 +57,7 @@
       (d)->relpath  = NULL; \
       (d)->buffer   = NULL; \
       (d)->nofollow = (n); \
+      (d)->global   = false; \
     } \
   while (0)
 
@@ -129,6 +130,9 @@
  *           - OUTPUT: May hold an allocated intermediate path which is
  *                     probably of no interest to the caller unless it holds
  *                     the relpath.
+ *  global   - INPUT:  [ORT §111] true: 路径是**内核构造的可信路径**
+ *                     （mqueue 命名空间），不做容器 root 重挂。只应由
+ *                     校验过组件的调用者设置；false 是全部既有语义。
  */
 
 struct inode_search_s
@@ -140,6 +144,7 @@ struct inode_search_s
   FAR const char *relpath;   /* Relative path into the mountpoint */
   FAR char *buffer;          /* Path expansion buffer */
   bool nofollow;             /* true: Don't follow terminal soft link */
+  bool global;               /* [ORT §111] true: skip container re-root */
 };
 
 /* Callback used by foreach_inode to traverse all inodes in the pseudo-
@@ -382,6 +387,20 @@ int inode_reserve(FAR const char *path,
                   mode_t mode, FAR struct inode **inode);
 
 /****************************************************************************
+ * Name: inode_reserve_global
+ *
+ * Description:
+ *   [ORT §111] Same as inode_reserve() but the path is resolved in the
+ *   **global** pseudo-file-system tree (no container root re-mount).
+ *   Reserved for kernel-constructed, component-validated paths such as
+ *   the mqueue instance namespace.
+ *
+ ****************************************************************************/
+
+int inode_reserve_global(FAR const char *path,
+                         mode_t mode, FAR struct inode **inode);
+
+/****************************************************************************
  * Name: inode_remove
  *
  * Description:
@@ -396,6 +415,20 @@ int inode_reserve(FAR const char *path,
  ****************************************************************************/
 
 int inode_remove(FAR const char *path);
+
+/****************************************************************************
+ * Name: inode_remove_global
+ *
+ * Description:
+ *   [ORT §111] Same as inode_remove() but the path is resolved in the
+ *   global pseudo-file-system tree (no container root re-mount).  Must be
+ *   paired with inode_reserve_global()/desc.global searches; using a
+ *   non-global removal on a container-re-rooted path was measured to
+ *   unlink the *mountpoint* inode instead (see handbook §111).
+ *
+ ****************************************************************************/
+
+int inode_remove_global(FAR const char *path);
 
 /****************************************************************************
  * Name: inode_addref

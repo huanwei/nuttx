@@ -108,14 +108,20 @@ int file_mq_unlink(FAR const char *mq_name)
   char fullpath[MAX_MQUEUE_PATH];
   int ret;
 
-  /* Get the full path to the message queue */
+  /* Get the full path to the message queue.  [ORT §111] 与 mq_open 同一
+   * 翻译咽喉（容器 → 实例前缀 + 单组件校验；宿主 → 原语义）。 */
 
-  snprintf(fullpath, MAX_MQUEUE_PATH,
-           CONFIG_FS_MQUEUE_VFS_PATH "/%s", mq_name);
+  ret = nxmq_ort_fullpath(mq_name, fullpath, sizeof(fullpath));
+  if (ret < 0)
+    {
+      return ret;
+    }
 
-  /* Get the inode for this message queue. */
+  /* Get the inode for this message queue.
+   * [§111] 前缀路径在全局树解析（容器 root 不参与）。 */
 
   SETUP_SEARCH(&desc, fullpath, false);
+  desc.global = true;
 
   ret = inode_find(&desc);
   if (ret < 0)
@@ -137,22 +143,8 @@ int file_mq_unlink(FAR const char *mq_name)
       goto errout_with_inode;
     }
 
-#ifdef CONFIG_ORT_CONTAINER
-  /* [ORT §106] IPC 面第一刀：容器不得**删除**全局 mqueue（与 mq_open
-   * 同闸同谓词；解析后闸位，A 侧被路径层先行挡掉）。 */
-
-  {
-    FAR struct tcb_s *ort_rtcb = this_task();
-
-    if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
-        (ort_rtcb->group->tg_ort_re_root ||
-         ort_rtcb->group->tg_ort_domain != 0))
-      {
-        ret = -EPERM;
-        goto errout_with_inode;
-      }
-  }
-#endif
+  /* [ORT §111] 隔离由命名空间承担：容器的名字只会解析到自己的前缀
+   * 下，删不到全局/其它实例的队列；§106 的"容器全拒"闸退役。 */
 
   /* Refuse to unlink the inode if it has children.  I.e., if it is
    * functioning as a directory and the directory is not empty.
@@ -170,7 +162,7 @@ int file_mq_unlink(FAR const char *mq_name)
    * inode.
    */
 
-  ret = inode_remove(fullpath);
+  ret = inode_remove_global(fullpath);   /* [§111] 与查找同一解析面 */
 
   /* The inode may has been unlinked from the tree in other core,
    * but it is not yet freed.

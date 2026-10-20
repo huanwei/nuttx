@@ -173,8 +173,8 @@ void inode_root_reserve(void)
  *
  ****************************************************************************/
 
-int inode_reserve(FAR const char *path,
-                  mode_t mode, FAR struct inode **inode)
+static int inode_reserve_common(FAR const char *path, mode_t mode,
+                                FAR struct inode **inode, bool global)
 {
   struct inode_search_s desc;
   FAR struct inode *left;
@@ -195,6 +195,7 @@ int inode_reserve(FAR const char *path,
   /* Find the location to insert the new subtree */
 
   SETUP_SEARCH(&desc, path, false);
+  desc.global = global;   /* [ORT §111] 可信路径在全局树里解析 */
 
   ret = inode_search(&desc);
   if (ret >= 0)
@@ -261,4 +262,16 @@ int inode_reserve(FAR const char *path,
 errout_with_search:
   RELEASE_SEARCH(&desc);
   return ret;
+}
+
+int inode_reserve(FAR const char *path,
+                  mode_t mode, FAR struct inode **inode)
+{
+  return inode_reserve_common(path, mode, inode, false);
+}
+
+int inode_reserve_global(FAR const char *path,
+                         mode_t mode, FAR struct inode **inode)
+{
+  return inode_reserve_common(path, mode, inode, true);
 }

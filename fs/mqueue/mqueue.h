@@ -29,6 +29,8 @@
 
 #include <nuttx/config.h>
 
+#include <stddef.h>
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -36,5 +38,15 @@
 /* Sizes of things */
 
 #define MAX_MQUEUE_PATH 64
+
+/****************************************************************************
+ * Public Function Prototypes
+ ****************************************************************************/
+
+/* [ORT §111] mqueue 名字 → VFS 路径（容器实例命名空间翻译）。
+ * 实现见 mq_open.c；mq_unlink 共用同一咽喉。 */
+
+int nxmq_ort_fullpath(FAR const char *mq_name, FAR char *fullpath,
+                      size_t fullsize);
 
 #endif /* __FS_MQUEUE_MQUEUE_H */

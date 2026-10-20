@@ -30,12 +30,14 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <sched.h>
 #include <mqueue.h>
 #include <fcntl.h>
 #include <assert.h>
 #include <errno.h>
 
+#include <nuttx/debug.h>
 #include <nuttx/mqueue.h>
 #include <nuttx/sched.h>
 #include <nuttx/fs/fs.h>
@@ -159,6 +161,116 @@ errout:
   return ret;
 }
 
+/****************************************************************************
+ * Name: nxmq_ort_fullpath
+ *
+ * Description:
+ *   [ORT §111] IPC 面第二刀：把用户给的 mqueue 名字转成 VFS 路径。
+ *   · 宿主/非容器：沿既有语义（去掉前导 '/'，其余原样 —— 不上新锁）。
+ *   · 容器（re_root || domain != 0）：只允许**单组件**名字（无 '/'、
+ *     非 "."/".."）—— 内核构造的路径不可能逃出 /var/mqueue；然后按
+ *     **实例**加前缀：
+ *       nsid 非零   → "ort.n<nsid>.<name>"（A/M 设根容器）
+ *       domain 非零 → "ort.d<domain>.<name>"（M 绑域容器）
+ *     两种前缀不同命名域，杜绝 nsid 与 domain 数值撞车。无键 →
+ *     -EPERM（fail-closed，绝不放行到全局命名空间）。
+ *   · 组件长度受 CONFIG_NAME_MAX 与 MAX_MQUEUE_PATH 双重限制：
+ *     前缀吃掉预算，超限 -ENAMETOOLONG（如实）。
+ *   · 调用者须以 desc.global=true 在**全局**树解析该路径（容器 root
+ *     不参与；见 inode_search/_ort_reroot）。
+ *
+ ****************************************************************************/
+
+int nxmq_ort_fullpath(FAR const char *mq_name, FAR char *fullpath,
+                      size_t fullsize)
+{
+#ifdef CONFIG_ORT_CONTAINER
+  FAR struct tcb_s *rtcb;
+  char comp[CONFIG_NAME_MAX + 1];
+  uint32_t key;
+  char kind;
+#endif
+  FAR const char *name;
+  int n;
+
+  if (mq_name == NULL || fullpath == NULL)
+    {
+      return -EINVAL;
+    }
+
+  name = mq_name;
+  while (*name == '/')
+    {
+      name++;
+    }
+
+  if (*name == '\0')
+    {
+      return -EINVAL;
+    }
+
+#ifdef CONFIG_ORT_CONTAINER
+  rtcb = this_task();
+  if (rtcb != NULL && rtcb->group != NULL &&
+      (rtcb->group->tg_ort_re_root || rtcb->group->tg_ort_domain != 0))
+    {
+      /* 容器：先拒绝一切可逃逸形态（单组件；`.`/`..` 会被 VFS 解析掉） */
+
+      if (strchr(name, '/') != NULL || strcmp(name, ".") == 0 ||
+          strcmp(name, "..") == 0)
+        {
+          return -EINVAL;
+        }
+
+      if (rtcb->group->tg_ort_nsid != 0)
+        {
+          key  = rtcb->group->tg_ort_nsid;
+          kind = 'n';
+        }
+      else if (rtcb->group->tg_ort_domain != 0)
+        {
+          key  = rtcb->group->tg_ort_domain;
+          kind = 'd';
+        }
+      else
+        {
+          return -EPERM;   /* 容器谓词为真却无实例键 —— fail-closed */
+        }
+
+      n = snprintf(comp, sizeof(comp), "ort.%c%u.%s",
+                   kind, (unsigned)key, name);
+      if (n < 0 || (size_t)n >= sizeof(comp) ||
+          (size_t)n > (size_t)CONFIG_NAME_MAX)
+        {
+          return -ENAMETOOLONG;
+        }
+
+      n = snprintf(fullpath, fullsize,
+                   CONFIG_FS_MQUEUE_VFS_PATH "/%s", comp);
+      if (n < 0 || (size_t)n >= fullsize)
+        {
+          return -ENAMETOOLONG;
+        }
+
+      /* 全部校验通过才打见证（失败的翻译不产生"已生效"假象） */
+
+      _alert("ORT: mqueue ns: %s -> %s\n", name, comp);
+      return OK;
+    }
+#endif
+
+  /* 宿主/非容器：既有语义（仅去前导 '/'） */
+
+  n = snprintf(fullpath, fullsize,
+               CONFIG_FS_MQUEUE_VFS_PATH "/%s", name);
+  if (n < 0 || (size_t)n >= fullsize)
+    {
+      return -ENAMETOOLONG;
+    }
+
+  return OK;
+}
+
 static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
                          int oflags, mode_t umask, va_list ap,
                          FAR int *created)
@@ -177,13 +289,6 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
   if (!mq || !mq_name || *mq_name == '\0')
     {
       ret = -EINVAL;
-      goto errout;
-    }
-
-  if (sizeof(CONFIG_FS_MQUEUE_VFS_PATH) + 1 + strlen(mq_name)
-      >= MAX_MQUEUE_PATH)
-    {
-      ret = -ENAMETOOLONG;
       goto errout;
     }
 
@@ -209,19 +314,14 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
 
   mode &= ~umask;
 
-  /* Skip over any leading '/'.  All message queue paths are relative to
-   * CONFIG_FS_MQUEUE_VFS_PATH.
-   */
+  /* Get the full path to the message queue.  [ORT §111] 容器名字在此
+   * 翻译到**实例命名空间**（单组件校验 + 前缀）；宿主保持原语义。 */
 
-  while (*mq_name == '/')
+  ret = nxmq_ort_fullpath(mq_name, fullpath, sizeof(fullpath));
+  if (ret < 0)
     {
-      mq_name++;
+      goto errout;
     }
-
-  /* Get the full path to the message queue */
-
-  snprintf(fullpath, MAX_MQUEUE_PATH,
-           CONFIG_FS_MQUEUE_VFS_PATH "/%s", mq_name);
 
   /* Make sure that the check for the existence of the message queue
    * and the creation of the message queue are atomic with respect to
@@ -239,6 +339,12 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
 
   SETUP_SEARCH(&desc, fullpath, false);
 
+  /* [ORT §111] 名字已由 nxmq_ort_fullpath 校验/加实例前缀，路径在
+   * **全局**树解析（容器 root 不参与）。§106 的"容器全拒"闸退役 —
+   * 隔离改由命名空间承担：容器的名字只会落到自己的前缀下。 */
+
+  desc.global = true;
+
   ret = inode_find(&desc);
   if (ret >= 0)
     {
@@ -253,26 +359,6 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
           ret = -ENXIO;
           goto errout_with_inode;
         }
-
-#ifdef CONFIG_ORT_CONTAINER
-      /* [ORT §106] IPC 面第一刀：容器不得打开**全局** mqueue（两 SKU
-       * 共享的 /var/mqueue 命名空间 —— 跨容器/监督者可达）。闸位在
-       * **解析后**（与 §101/§104 设备面同构）：A 侧容器被路径层重挂
-       * 挡在 inode_find（ENOENT），根本走不到这里；M 绑域容器是实弹面
-       * （闸前预跑实证 open=OK——缺口在案）。 */
-
-      {
-        FAR struct tcb_s *ort_rtcb = this_task();
-
-        if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
-            (ort_rtcb->group->tg_ort_re_root ||
-             ort_rtcb->group->tg_ort_domain != 0))
-          {
-            ret = -EPERM;
-            goto errout_with_inode;
-          }
-      }
-#endif
 
       /* It exists and is a message queue.  Check if the caller wanted to
        * create a new mqueue with this name.
@@ -306,27 +392,11 @@ static int file_mq_vopen(FAR struct file *mq, FAR const char *mq_name,
           goto errout_with_lock;
         }
 
-#ifdef CONFIG_ORT_CONTAINER
-      /* [ORT §106] 创建侧同闸（第一刀 = 容器全拒绝，创建与打开一体；
-       * 按实例发前缀 = 后续刀）。闸在解析后：A 侧容器先被路径层挡。 */
-
-      {
-        FAR struct tcb_s *ort_rtcb = this_task();
-
-        if (ort_rtcb != NULL && ort_rtcb->group != NULL &&
-            (ort_rtcb->group->tg_ort_re_root ||
-             ort_rtcb->group->tg_ort_domain != 0))
-          {
-            ret = -EPERM;
-            goto errout_with_lock;
-          }
-      }
-#endif
-
-      /* Create an inode in the pseudo-filesystem at this path */
+      /* Create an inode in the pseudo-filesystem at this path.
+       * [ORT §111] 全局树预留（容器前缀路径不经 root 重挂）。 */
 
       inode_lock();
-      ret = inode_reserve(fullpath, mode, &inode);
+      ret = inode_reserve_global(fullpath, mode, &inode);
       inode_unlock();
 
       if (ret < 0)

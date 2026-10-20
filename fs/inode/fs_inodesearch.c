@@ -158,7 +158,11 @@ static int _ort_reroot(FAR struct inode_search_s *desc, bool fromcwd)
   FAR struct tcb_s *rtcb = nxsched_self();
 
 
-  if (rtcb == NULL || rtcb->group == NULL ||
+  /* [ORT §111] desc->global：内核构造的可信路径（mqueue 实例命名空间）
+   * 在**全局**树里解析 —— 容器 root 不参与。组件由构造者校验
+   * （单组件、无 `/`、非 `.`/`..`），不可能是逃逸路径。 */
+
+  if (rtcb == NULL || rtcb->group == NULL || desc->global ||
       !rtcb->group->tg_ort_re_root || rtcb->group->tg_ort_root == NULL ||
       desc->path[0] != '/')
     {

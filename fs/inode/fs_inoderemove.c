@@ -56,7 +56,7 @@
  *
  ****************************************************************************/
 
-static FAR struct inode *inode_unlink(FAR const char *path)
+static FAR struct inode *inode_unlink(FAR const char *path, bool global)
 {
   struct inode_search_s desc;
   FAR struct inode *inode = NULL;
@@ -69,9 +69,12 @@ static FAR struct inode *inode_unlink(FAR const char *path)
       return NULL;
     }
 
-  /* Find the node to unlink */
+  /* Find the node to unlink.  [ORT §111] global=true 用于内核构造的
+   * 可信路径（mqueue 实例命名空间）：必须与最初的查找用同一种解析，
+   * 否则容器 root 重挂会把搜索落到挂载点 inode 上（实测把 /u 卸掉）。 */
 
   SETUP_SEARCH(&desc, path, true);
+  desc.global = global;
 
   ret = inode_search(&desc);
   if (ret >= 0)
@@ -133,13 +136,13 @@ errout:
  *
  ****************************************************************************/
 
-int inode_remove(FAR const char *path)
+static int inode_remove_common(FAR const char *path, bool global)
 {
   FAR struct inode *inode;
 
   /* Find the inode and unlink it from the in-memory inode tree */
 
-  inode = inode_unlink(path);
+  inode = inode_unlink(path, global);
   if (inode)
     {
       /* Found it! But we cannot delete the inode if there are references
@@ -166,4 +169,14 @@ int inode_remove(FAR const char *path)
   /* The node does not exist */
 
   return -ENOENT;
+}
+
+int inode_remove(FAR const char *path)
+{
+  return inode_remove_common(path, false);
+}
+
+int inode_remove_global(FAR const char *path)
+{
+  return inode_remove_common(path, true);
 }
