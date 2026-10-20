@@ -449,7 +449,15 @@ int nx_pthread_create(pthread_trampoline_t trampoline, FAR pthread_t *thread,
 
   if (thread != NULL)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      /* [§109] 句柄本地化：容器内 pthread_t 用本地 tid（与 pthread_self/
+       * gettid 同号 —— tls_init_info 已在上面给本线程落号）。容器外
+       * 原样。 */
+
+      *thread = (pthread_t)ort_tid_localize((pid_t)ptcb->pid);
+#else
       *thread = (pthread_t)ptcb->pid;
+#endif
     }
 
   /* Then activate the task */

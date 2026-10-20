@@ -168,6 +168,9 @@ int nxtask_init(FAR struct tcb_s *tcb, const char *name, int priority,
           tcb->group->tg_ort_lpid = ort_pidns_new(&tcb->group->tg_ort_nsid);
         }
 
+      /* [§109] 组长的**线程本地号** = 组本地号（join/new 已定）。 */
+
+      tcb->ort_ltid = tcb->group->tg_ort_lpid;
     }
 #endif
 

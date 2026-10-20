@@ -79,6 +79,14 @@ int pthread_join(pthread_t thread, FAR pthread_addr_t *pexit_value)
   FAR struct tcb_s *tcb;
   int ret = OK;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面：pthread_t 是数字（容器内 = 本地 tid）——入口先
+   * 解析成全局号；下游的 tcb 查找与 join 信息键（全按全局号落）
+   * 照旧。容器外原样。 */
+
+  thread = (pthread_t)ort_pid_resolve((pid_t)thread);
+#endif
+
   /* pthread_join() is a cancellation point */
 
   enter_cancellation_point();

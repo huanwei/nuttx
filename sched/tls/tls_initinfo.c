@@ -28,6 +28,7 @@
 #include <errno.h>
 
 #include "tls.h"
+#include "sched/sched.h"   /* [§109] ort_pidns_next_tid 原型 */
 
 /****************************************************************************
  * Public Functions
@@ -77,16 +78,22 @@ int tls_init_info(FAR struct tcb_s *tcb)
   /* Thread ID */
 
 #ifdef CONFIG_ORT_CONTAINER
-  /* [ORT §102] 容器**主线程**的 gettid 视图 = 组本地号（Linux 口径
-   * tid==pid；容器 init getpid=gettid=1）。pthread 线程不在此虚拟化
-   * （线程号面仍全局 —— 边界如实，与 tgkill 的 tid 面一起留后续刀）。
-   * 落点在此的原因：knsh 用户态 gettid() = 读 TLS tl_tid（一处咽喉）；
-   * 本函数对 pthread 也调用（pthread_create.c）——故必须排除 pthread。 */
+  /* [ORT §109] 容器**所有线程**的 gettid 视图 = 本线程本地 tid：
+   *   组长 = 组 lpid（join 时已落 ort_ltid，本处沿用）；pthread =
+   *   从同实例**同一计数器**取号（Linux：tid 与 pid 同空间）。
+   *   计数器耗尽（返回 0）→ 降级为全局号（fail-open，如实）。
+   * 咽喉：knsh 用户态 gettid() 读 TLS tl_tid（本函数对 pthread 也
+   * 调用 —— pthread_create.c；§102 时曾排除 pthread，§109 收口）。 */
 
-  if (tcb->group != NULL && tcb->group->tg_ort_lpid != 0 &&
-      (tcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_PTHREAD)
+  if (tcb->group != NULL && tcb->group->tg_ort_nsid != 0)
     {
-      info->tl_tid = (pid_t)tcb->group->tg_ort_lpid;
+      if (tcb->ort_ltid == 0)
+        {
+          tcb->ort_ltid = ort_pidns_next_tid(tcb->group->tg_ort_nsid);
+        }
+
+      info->tl_tid = tcb->ort_ltid != 0 ? (pid_t)tcb->ort_ltid
+                                        : tcb->pid;
     }
   else
 #endif

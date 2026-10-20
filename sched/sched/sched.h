@@ -620,6 +620,10 @@ pid_t    ort_pid_resolve(pid_t pid);
 pid_t    ort_pid_localize(pid_t gpid);
 pid_t    ort_wait_localize(pid_t gpid, uint32_t lpid);
 
+/* [ORT §109] 线程号面：pthread 的本地 tid 分配 + 句柄回传本地化 */
+uint32_t ort_pidns_next_tid(uint32_t nsid);
+pid_t    ort_tid_localize(pid_t gpid);
+
 /* [ORT §54 欠账，§98 清] 架构侧实现（arch/arm/src/common/arm_ortcommon.h
  * 为准）；本处补声明消 task_prctl.c 的**隐式声明**（编译警告早就在，
  * 此前该 TU 未重编所以没露头——§94"警告必须看"同族）。 */

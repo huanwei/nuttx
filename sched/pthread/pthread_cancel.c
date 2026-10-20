@@ -46,6 +46,12 @@ int pthread_cancel(pthread_t thread)
 {
   FAR struct tcb_s *tcb;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面：本地 tid → 全局号（同 pthread_join；0 原样）。 */
+
+  thread = (pthread_t)ort_pid_resolve((pid_t)thread);
+#endif
+
   /* First, make sure that the handle references a valid thread */
 
   if ((pid_t)thread == IDLE_PROCESS_ID)

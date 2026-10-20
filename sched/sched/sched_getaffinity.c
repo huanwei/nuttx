@@ -74,6 +74,12 @@ int nxsched_get_affinity(pid_t pid, size_t cpusetsize, FAR cpu_set_t *mask)
   irqstate_t flags;
   int ret;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面（只读口）：容器内局部号 → 全局号。 */
+
+  pid = ort_pid_resolve(pid);
+#endif
+
   DEBUGASSERT(cpusetsize == sizeof(cpu_set_t) && mask != NULL);
 
   /* Verify that the PID corresponds to a real task */

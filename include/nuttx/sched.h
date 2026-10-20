@@ -754,6 +754,13 @@ struct tcb_s
 
   bool    ort_sd_active;
   uint8_t ort_sd_skips;
+
+  /* [§109] 本**线程**在容器 pid 命名空间里的本地 tid（1 起；0 = 未入
+   * 命名空间）。组长 = 组的 lpid（join 时落）；其余 pthread 在
+   * tls_initinfo 处从**同一计数器**取号（Linux：tid 与 pid 同空间）。
+   * 句柄面（pthread_* 的 pthread_t=数字）经 ort_pid_resolve 按它解析。 */
+
+  uint32_t ort_ltid;
 #endif
 #ifndef CONFIG_DISABLE_ALL_SIGNALS
   sigset_t   sigprocmask;                /* Signals that are blocked        */

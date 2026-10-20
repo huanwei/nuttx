@@ -70,6 +70,12 @@ int pthread_detach(pthread_t thread)
   FAR struct tcb_s *tcb;
   int ret;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面：本地 tid → 全局号（同 pthread_join）。 */
+
+  thread = (pthread_t)ort_pid_resolve((pid_t)thread);
+#endif
+
   nxrmutex_lock(&group->tg_mutex);
 
   tcb = nxsched_get_tcb((pid_t)thread);

@@ -203,13 +203,54 @@ void ort_pidns_put(uint32_t nsid)
 }
 
 /****************************************************************************
+ * Name: ort_pidns_next_tid
+ *
+ * Description:
+ *   [§109] 给 pthread **线程**分配实例内本地 tid（与 lpid **共用同一
+ *   计数器** —— Linux 口径：tid 与 pid 同空间）。表满/未入返回 0
+ *   （调用方降级为全局号，fail-open）。
+ *
+ ****************************************************************************/
+
+uint32_t ort_pidns_next_tid(uint32_t nsid)
+{
+  irqstate_t flags;
+  uint32_t tid = 0;
+  int i;
+
+  if (nsid == 0)
+    {
+      return 0;
+    }
+
+  flags = enter_critical_section();
+
+  for (i = 0; i < ORT_PIDNS_MAX; i++)
+    {
+      if (g_ort_pidns[i].pd_used && g_ort_pidns[i].pd_nsid == nsid)
+        {
+          tid = ++g_ort_pidns[i].pd_next;
+          break;
+        }
+    }
+
+  leave_critical_section(flags);
+  return tid;
+}
+
+/****************************************************************************
  * Name: ort_pid_resolve
  *
  * Description:
- *   信号入口（kill/tgkill/sigqueue）的号解析：调用者是容器成员且
- *   pid>0 命中**本实例**成员的本地号 ⇒ 换成其全局 pid；否则原样返回
- *   （后续按原全局号走既有闸 —— 跨组 -EPERM 不变）。遍历按 PIDHASH
- *   （任务数小，临界区内直扫）。
+ *   号解析（信号三入口 + 调度入口 + pthread 句柄面共用）：调用者是
+ *   容器成员且 pid>0 命中**本实例**成员的号 ⇒ 换成其全局 pid；
+ *   否则原样返回（后续按原全局号走既有闸 —— 跨组 -EPERM 不变）。
+ *   遍历按 PIDHASH（任务数小，临界区内直扫）。
+ *
+ *   [§109] 匹配面扩到 **tcb 级**：组的本地号（组长/进程号）**或**
+ *   线程的本地 tid（pthread 句柄）—— 句柄面（pthread_join/kill/
+ *   detach 的 pthread_t、调度入口的 tid 参数、tgkill 的 tid 参数）
+ *   因此统一走这一处。
  *
  *   容器谓词 = §86/§96③ 同款 **tg_ort_re_root**（§99 r1 实锤教训：
  *   "root 非空"会把设根者 orting 自己算进来）。
@@ -236,7 +277,8 @@ pid_t ort_pid_resolve(pid_t pid)
   flags = enter_critical_section();
 
   /* PIDHASH 表直扫（pid 唯一、无冲突；表大小即上界 —— 同
-   * nxsched_get_tcb 的口径） */
+   * nxsched_get_tcb 的口径）。组号与线程号同空间（同一计数器），
+   * 二者不会撞号。 */
 
   for (i = 0; i < g_npidhash; i++)
     {
@@ -244,7 +286,8 @@ pid_t ort_pid_resolve(pid_t pid)
 
       if (tcb != NULL && tcb->group != NULL &&
           tcb->group->tg_ort_nsid == rtcb->group->tg_ort_nsid &&
-          tcb->group->tg_ort_lpid == (uint32_t)pid)
+          (tcb->group->tg_ort_lpid == (uint32_t)pid ||
+           tcb->ort_ltid == (uint32_t)pid))
         {
           found = tcb->pid;
           break;
@@ -304,6 +347,46 @@ pid_t ort_pid_localize(pid_t gpid)
  *   容器成员且见证号非 0（0 = 子未曾入命名空间 / 见证缺失）。
  *
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: ort_tid_localize
+ *
+ * Description:
+ *   [§109] **全局号 → 本地线程号**（活体查表，tcb 级 ort_ltid 版）：
+ *   pthread_create 把新线程的句柄交还调用者时用。组长 tcb 的
+ *   ort_ltid = 组 lpid（同一计数器），所以对组长返回值与组本地号一致。
+ *   任一谓词不过原样返回 —— 容器外零影响。
+ *
+ ****************************************************************************/
+
+pid_t ort_tid_localize(pid_t gpid)
+{
+  FAR struct tcb_s *rtcb = this_task();
+  FAR struct tcb_s *ctcb;
+  irqstate_t flags;
+
+  if (gpid <= 0 || rtcb == NULL || rtcb->group == NULL)
+    {
+      return gpid;
+    }
+
+  if (!rtcb->group->tg_ort_re_root || rtcb->group->tg_ort_nsid == 0)
+    {
+      return gpid;
+    }
+
+  flags = enter_critical_section();
+  ctcb = nxsched_get_tcb(gpid);
+  if (ctcb != NULL && ctcb->group != NULL &&
+      ctcb->group->tg_ort_nsid == rtcb->group->tg_ort_nsid &&
+      ctcb->ort_ltid != 0)
+    {
+      gpid = (pid_t)ctcb->ort_ltid;
+    }
+
+  leave_critical_section(flags);
+  return gpid;
+}
 
 pid_t ort_wait_localize(pid_t gpid, uint32_t lpid)
 {

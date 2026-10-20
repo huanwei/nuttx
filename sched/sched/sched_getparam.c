@@ -120,6 +120,12 @@ int nxsched_get_param(pid_t pid, FAR struct sched_param *param)
   irqstate_t flags;
   int ret = OK;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面（只读口）：容器内局部号（组号或线程 tid）→ 全局号。 */
+
+  pid = ort_pid_resolve(pid);
+#endif
+
   if (param == NULL)
     {
       ret = -EINVAL;

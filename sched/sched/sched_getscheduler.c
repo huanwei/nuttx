@@ -74,6 +74,12 @@ int nxsched_get_scheduler(pid_t pid)
   int ret = -ESRCH;
   int policy;
 
+#ifdef CONFIG_ORT_CONTAINER
+  /* [§109] 句柄面（只读口）：容器内局部号 → 全局号。 */
+
+  pid = ort_pid_resolve(pid);
+#endif
+
   /* Verify that the PID corresponds to a real task */
 
   if (pid == 0)
