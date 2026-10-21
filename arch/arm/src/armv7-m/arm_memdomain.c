@@ -198,6 +198,7 @@ int ort_container_bind(pid_t pid, int domain)
   FAR struct task_group_s *group;
   irqstate_t flags;
   bool was_bound;
+  uint8_t enc;
   int ret;
 
   /* ★ 只有监督者能绑域。
@@ -255,6 +256,7 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
+  enc = (uint8_t)ORT_DOMAIN_ENCODE(domain);
   was_bound = (group->tg_ort_domain != 0);
 
   leave_critical_section(flags);
@@ -283,7 +285,22 @@ int ort_container_bind(pid_t pid, int domain)
       return -ESRCH;
     }
 
-  tcb->group->tg_ort_domain = ORT_DOMAIN_ENCODE(domain);
+  /* [§117] rebind 不允许换域；新绑定域组引用 +1、代际 +1（与落域
+   * 同临界区完成，组销毁的 -1 才可能与 +1 配对）。 */
+
+  if (tcb->group->tg_ort_domain != 0 &&
+      tcb->group->tg_ort_domain != enc)
+    {
+      leave_critical_section(flags);
+      return -EINVAL;
+    }
+
+  if (tcb->group->tg_ort_domain == 0)
+    {
+      ort_ipc_domain_bind(enc);
+    }
+
+  tcb->group->tg_ort_domain = enc;
 
   leave_critical_section(flags);
   return OK;

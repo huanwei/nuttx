@@ -50,9 +50,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 #include <nuttx/sched.h>
 #include <nuttx/kmalloc.h>
 #include <nuttx/debug.h>
+#include <nuttx/mqueue.h>
+#include <nuttx/wqueue.h>
 
 #include "sched/sched.h"
 #include "task/task.h"
@@ -82,6 +86,22 @@ struct ort_pidns_s
 static struct ort_pidns_s g_ort_pidns[ORT_PIDNS_MAX];
 static uint32_t g_ort_nsid_next;        /* 实例号发号器（只增不复用 ——
                                          * 陈旧号绝不与后来者混淆） */
+
+/* [§117] M 域键 IPC 命名空间：每域组引用 + 代际。enc 取值 1..255
+ * （tg_ort_domain 的编码）。新绑定 gen++；延迟 GC worker 只在代际未变
+ * （期间没有新实例绑定该域）时执行。 */
+
+#define ORT_IPC_DOMAIN_MAX 256
+
+static uint16_t g_ipc_dom_refs[ORT_IPC_DOMAIN_MAX];
+static uint32_t g_ipc_dom_gen[ORT_IPC_DOMAIN_MAX];
+
+struct ort_dom_gc_s
+{
+  struct work_s work;
+  uint8_t  enc;
+  uint32_t gen;
+};
 
 /****************************************************************************
  * Public Functions
@@ -410,6 +430,124 @@ pid_t ort_wait_localize(pid_t gpid, uint32_t lpid)
     }
 
   return (pid_t)lpid;
+}
+
+/****************************************************************************
+ * [§117] M 域键 IPC 命名空间的生命周期（组引用 + 延迟 GC）
+ *
+ *   域键 `ort.d<enc>.` 在 CG 重启时复用（§114 绑定前清理保证不跨实例
+ *   泄漏），但旧队列会留到"下一次绑定该域"。本机制给每个域记**组引用**
+ *   （绑域 +1、§113 继承 +1、组销毁 -1）：归零 = 实例彻底死亡 → LPWORK
+ *   异步清命名空间。新绑定先 gen++，使此前排队的 worker 跳过（绑定自身
+ *   的 §114 清理已把旧队清掉），避免延迟清理误伤新实例。
+ *
+ *   enc 即 tg_ort_domain（0 = 未绑；n>0 = 域 n-1）。
+ ****************************************************************************/
+
+static void ort_ipc_domain_gc_worker(FAR void *arg)
+{
+  FAR struct ort_dom_gc_s *p = (FAR struct ort_dom_gc_s *)arg;
+  irqstate_t flags;
+  bool current;
+  char prefix[32];
+
+  flags = enter_critical_section();
+  current = (g_ipc_dom_gen[p->enc] == p->gen);
+  leave_critical_section(flags);
+
+  if (current && p->enc != 0)
+    {
+      snprintf(prefix, sizeof(prefix), "ort.d%u.", (unsigned)p->enc);
+      nxmq_purge_prefix(prefix);
+    }
+
+  kmm_free(p);
+}
+
+void ort_ipc_domain_bind(uint8_t enc)
+{
+  irqstate_t flags;
+
+  if (enc == 0)
+    {
+      return;
+    }
+
+  flags = enter_critical_section();
+  g_ipc_dom_gen[enc]++;
+  if (g_ipc_dom_refs[enc] < 0xffff)
+    {
+      g_ipc_dom_refs[enc]++;
+    }
+
+  leave_critical_section(flags);
+}
+
+void ort_ipc_domain_ref(uint8_t enc)
+{
+  irqstate_t flags;
+
+  if (enc == 0)
+    {
+      return;
+    }
+
+  flags = enter_critical_section();
+  if (g_ipc_dom_refs[enc] < 0xffff)
+    {
+      g_ipc_dom_refs[enc]++;
+    }
+
+  leave_critical_section(flags);
+}
+
+void ort_ipc_domain_unref(uint8_t enc)
+{
+  FAR struct ort_dom_gc_s *p;
+  irqstate_t flags;
+  bool zero = false;
+  uint32_t gen = 0;
+
+  if (enc == 0)
+    {
+      return;
+    }
+
+  flags = enter_critical_section();
+  if (g_ipc_dom_refs[enc] > 0 && --g_ipc_dom_refs[enc] == 0)
+    {
+      zero = true;
+      gen = g_ipc_dom_gen[enc];
+    }
+
+  leave_critical_section(flags);
+
+  if (!zero)
+    {
+      return;
+    }
+
+  /* LPWORK 在未配置低优先队列的 SKU 上被 wqueue.h 重定向到 HPWORK
+   * （同一 qid 语义），两 SKU 都可用。 */
+
+  p = kmm_malloc(sizeof(*p));
+  if (p == NULL)
+    {
+      _alert("ORT: ipc domain gc alloc failed: d%u (leak)\n",
+             (unsigned)enc);
+      return;
+    }
+
+  memset(p, 0, sizeof(*p));
+  p->enc = enc;
+  p->gen = gen;
+
+  if (work_queue(LPWORK, &p->work, ort_ipc_domain_gc_worker, p, 0) < 0)
+    {
+      _alert("ORT: ipc domain gc queue failed: d%u (leak)\n",
+             (unsigned)enc);
+      kmm_free(p);
+    }
 }
 
 #endif /* CONFIG_ORT_CONTAINER */

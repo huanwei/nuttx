@@ -369,7 +369,6 @@ int nxmq_purge_prefix(FAR const char *prefix)
  *
  ****************************************************************************/
 
-#ifdef CONFIG_SCHED_LPWORK
 struct nxmq_purge_ns_s
 {
   struct work_s work;
@@ -385,11 +384,9 @@ static void nxmq_purge_ns_worker(FAR void *arg)
   nxmq_purge_prefix(prefix);
   kmm_free(p);
 }
-#endif
 
 int nxmq_purge_ns_async(uint32_t nsid)
 {
-#ifdef CONFIG_SCHED_LPWORK
   FAR struct nxmq_purge_ns_s *p;
   int ret;
 
@@ -418,8 +415,4 @@ int nxmq_purge_ns_async(uint32_t nsid)
     }
 
   return ret;
-#else
-  UNUSED(nsid);
-  return -ENOSYS;
-#endif
 }

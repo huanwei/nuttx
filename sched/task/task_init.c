@@ -82,6 +82,14 @@ static int ort_inherit_container_attrs(FAR struct task_group_s *parent,
     }
 
   child->tg_ort_devwl = dup;
+
+  /* [§117] 子组继承了域 → 域键 IPC 名空间的组引用 +1（组销毁时 -1）。 */
+
+  if (child->tg_ort_domain != 0)
+    {
+      ort_ipc_domain_ref(child->tg_ort_domain);
+    }
+
   return OK;
 }
 #endif

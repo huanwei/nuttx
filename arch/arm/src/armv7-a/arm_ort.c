@@ -321,6 +321,9 @@ int ort_container_domain(FAR struct task_group_s *group)
 int ort_container_bind(pid_t pid, int domain)
 {
   FAR struct tcb_s *tcb;
+  irqstate_t flags;
+  uint8_t enc;
+  uint8_t old;
   int ret;
 
   if (nxsched_self()->pid != ort_supervisor_pid())
@@ -360,10 +363,21 @@ int ort_container_bind(pid_t pid, int domain)
    *   与 MPU 侧完全一致 —— 见 include/nuttx/sched.h 里那段说明。
    */
 
+  enc = (uint8_t)(domain + 1);
+  old = tcb->group->tg_ort_domain;
+
+  /* [§117] rebind 不允许换域（组引用/命名空间无法平衡）；同域 rebind
+   * 幂等。 */
+
+  if (old != 0 && old != enc)
+    {
+      return -EINVAL;
+    }
+
   /* [§114] 新实例（尚未绑域）绑定前清旧实例的 mqueue 域键命名空间；
    * rebind 不动。失败 → fail-closed，不完成绑定。 */
 
-  if (tcb->group->tg_ort_domain == 0)
+  if (old == 0)
     {
       ret = ort_ipc_purge_domain(domain);
       if (ret < 0)
@@ -372,7 +386,22 @@ int ort_container_bind(pid_t pid, int domain)
         }
     }
 
-  tcb->group->tg_ort_domain = (uint8_t)(domain + 1);
+  /* [§117] 新绑定：域组引用 +1、代际 +1（与落域同临界区完成，
+   * 组销毁的 -1 才可能与 +1 配对）。 */
+
+  flags = enter_critical_section();
+  if (tcb->group->tg_ort_domain == 0)
+    {
+      ort_ipc_domain_bind(enc);
+    }
+  else if (tcb->group->tg_ort_domain != enc)
+    {
+      leave_critical_section(flags);
+      return -EINVAL;
+    }
+
+  tcb->group->tg_ort_domain = enc;
+  leave_critical_section(flags);
   return OK;
 }
 

@@ -313,6 +313,14 @@ void group_drop(FAR struct task_group_s *group)
           kmm_free(group->tg_ort_devwl);
           group->tg_ort_devwl = NULL;
         }
+
+      /* [§117] 域键 IPC 名空间：本组退出域引用；最后一个组离开时
+       * 异步清 `ort.d<enc>.`（LPWORK；与绑定的 §114 清理互不误伤）。 */
+
+      if (group->tg_ort_domain != 0)
+        {
+          ort_ipc_domain_unref(group->tg_ort_domain);
+        }
 #endif
 
       /* Release the group container itself */

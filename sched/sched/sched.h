@@ -614,6 +614,15 @@ static inline_function int nxsched_select_cpu(cpu_set_t affinity)
 uint32_t ort_pidns_new(FAR uint32_t *nsid_out);
 uint32_t ort_pidns_join(uint32_t nsid);
 bool     ort_pidns_put(uint32_t nsid);   /* [§115] true = 实例最后一个引用 */
+
+/* [§117] M 域键 IPC 命名空间生命周期：每域**组引用**（绑域/继承各 +1，
+ * 组销毁 -1）；归零时 LPWORK 异步清 ort.d<enc>.。新绑定 gen++ 使延迟
+ * worker 跳过（绑定自身的 §114 清理已清旧队）。enc = tg_ort_domain
+ * （0 = 未绑；n>0 = 域 (n-1)）。 */
+
+void     ort_ipc_domain_bind(uint8_t enc);
+void     ort_ipc_domain_ref(uint8_t enc);
+void     ort_ipc_domain_unref(uint8_t enc);
 pid_t    ort_pid_resolve(pid_t pid);
 
 /* [ORT §99] 号回传本地化（spawn 活体查表 / waitpid 见证号） */
