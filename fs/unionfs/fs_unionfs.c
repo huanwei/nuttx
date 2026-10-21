@@ -149,6 +149,8 @@ static void    unionfs_destroy(FAR struct unionfs_inode_s *ui);
 
 static bool    unionfs_lowerhidden(FAR struct unionfs_inode_s *ui,
                                    FAR const char *relpath);
+static bool    unionfs_isopaque(FAR struct unionfs_inode_s *ui,
+                                FAR const char *relpath);
 
 /* Operations on opened files (with struct file) */
 
@@ -1117,6 +1119,130 @@ static bool unionfs_hidemarker(FAR const char *relpath)
 }
 
 /****************************************************************************
+ * Name: unionfs_lower_names
+ *
+ * Description:
+ *   [ORT §110/§116] 两遍式枚举下层目录的子项名（跳过 `.`/`..`/标记域）：
+ *   先计数、分配、再抄名 —— 目录流在返回前关闭，调用者随后才动文件
+ *   系统。名字上界 256（超出 -ENOSPC，fail-closed）。成功时 *names 为
+ *   堆缓冲（0 项时可为 NULL）、*count 为项数；调用者负责 free。
+ *
+ *   ★ 如实注记：§110 首版挂死的**真因不是**"目录流期间嵌套 open"
+ *   （两遍式改完照样挂）；真因是 copyup_item 的 1KB 栈缓冲乘递归层数
+ *   压穿内核栈。两遍式保留是防御性写法，不是修复。
+ *
+ ****************************************************************************/
+
+static int unionfs_lower_names(FAR struct unionfs_inode_s *ui,
+                               FAR const char *relpath,
+                               FAR char **names, FAR int *count)
+{
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR const struct mountpt_operations *lops = uml->um_node->u.i_mops;
+  FAR struct fs_dirent_s *dir = NULL;
+  struct dirent entry;
+  int n;
+  int idx;
+  int ret;
+
+  *names = NULL;
+  *count = 0;
+
+  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  n = 0;
+  for (;;)
+    {
+      ret = lops->readdir(uml->um_node, dir, &entry);
+      if (ret < 0)
+        {
+          break;
+        }
+
+      if (strcmp(entry.d_name, ".") == 0 ||
+          strcmp(entry.d_name, "..") == 0 ||
+          unionfs_hidemarker(entry.d_name))
+        {
+          continue;
+        }
+
+      n++;
+    }
+
+  if (lops->closedir != NULL)
+    {
+      lops->closedir(uml->um_node, dir);
+    }
+
+  if (n == 0)
+    {
+      return OK;
+    }
+
+  if (n > 256)
+    {
+      /* 原型上界（fail-closed）：更大的目录不做整树复制。 */
+
+      return -ENOSPC;
+    }
+
+  *names = fs_heap_malloc((size_t)n * (NAME_MAX + 1));
+  if (*names == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  dir = NULL;
+  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
+  if (ret < 0)
+    {
+      fs_heap_free(*names);
+      *names = NULL;
+      return ret;
+    }
+
+  idx = 0;
+  while (idx < n)
+    {
+      ret = lops->readdir(uml->um_node, dir, &entry);
+      if (ret < 0)
+        {
+          break;
+        }
+
+      if (strcmp(entry.d_name, ".") == 0 ||
+          strcmp(entry.d_name, "..") == 0 ||
+          unionfs_hidemarker(entry.d_name))
+        {
+          continue;
+        }
+
+      strlcpy(*names + (size_t)idx * (NAME_MAX + 1), entry.d_name,
+              NAME_MAX + 1);
+      idx++;
+    }
+
+  if (lops->closedir != NULL)
+    {
+      lops->closedir(uml->um_node, dir);
+    }
+
+  if (idx != n)
+    {
+      fs_heap_free(*names);
+      *names = NULL;
+      return -EIO;
+    }
+
+  *count = n;
+  return OK;
+}
+
+/****************************************************************************
  * Name: unionfs_copyup_tree / unionfs_copyup_item
  *
  * Description:
@@ -1206,12 +1332,9 @@ static int unionfs_copyup_tree(FAR struct unionfs_inode_s *ui,
 {
   FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
   FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
-  FAR const struct mountpt_operations *lops = uml->um_node->u.i_mops;
   FAR const struct mountpt_operations *uops = umu->um_node->u.i_mops;
   FAR const char *upath;
-  FAR struct fs_dirent_s *dir = NULL;
   FAR char *names;
-  struct dirent entry;
   struct stat st;
   int count;
   int idx;
@@ -1243,100 +1366,18 @@ static int unionfs_copyup_tree(FAR struct unionfs_inode_s *ui,
         }
     }
 
-  /* ★★ 两遍式：**先枚举名字并关闭目录流，再逐项上移**。
-   *
-   *   与 clearmarkers 的"开-查-关-作"同型：不在持有目录流（目录对象
-   *   引用+锁）期间对同一文件系统做打开/创建。★ 如实注记：§110 首版
-   *   挂死的**真因不是**这条（两遍式改完照样挂）；真因是 copyup_item
-   *   的 1KB 栈缓冲区乘递归层数压穿内核栈，改堆后才通。两遍式保留是
-   *   防御性写法，不是修复。 */
+  /* 两遍式枚举（先抄名关流，再逐项上移；理由见 unionfs_lower_names）。 */
 
-  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
+  ret = unionfs_lower_names(ui, relpath, &names, &count);
   if (ret < 0)
     {
       return ret;
-    }
-
-  count = 0;
-  for (;;)
-    {
-      ret = lops->readdir(uml->um_node, dir, &entry);
-      if (ret < 0)
-        {
-          break;
-        }
-
-      if (strcmp(entry.d_name, ".") == 0 ||
-          strcmp(entry.d_name, "..") == 0 ||
-          unionfs_hidemarker(entry.d_name))
-        {
-          continue;
-        }
-
-      count++;
-    }
-
-  if (lops->closedir != NULL)
-    {
-      lops->closedir(uml->um_node, dir);
     }
 
   if (count == 0)
     {
-      return OK;
+      return OK;   /* names 为 NULL */
     }
-
-  if (count > 256)
-    {
-      /* 原型上界（fail-closed）：更大的目录 rename 不做 ——
-       * 与"一次性整树复制"的成本口径一致，如实。 */
-
-      return -ENOSPC;
-    }
-
-  names = fs_heap_malloc((size_t)count * (NAME_MAX + 1));
-  if (names == NULL)
-    {
-      return -ENOMEM;
-    }
-
-  dir = NULL;
-  ret = unionfs_tryopendir(uml->um_node, relpath, uml->um_prefix, &dir);
-  if (ret < 0)
-    {
-      fs_heap_free(names);
-      return ret;
-    }
-
-  idx = 0;
-  while (idx < count)
-    {
-      ret = lops->readdir(uml->um_node, dir, &entry);
-      if (ret < 0)
-        {
-          break;
-        }
-
-      if (strcmp(entry.d_name, ".") == 0 ||
-          strcmp(entry.d_name, "..") == 0 ||
-          unionfs_hidemarker(entry.d_name))
-        {
-          continue;
-        }
-
-      strlcpy(names + (size_t)idx * (NAME_MAX + 1), entry.d_name,
-              NAME_MAX + 1);
-      idx++;
-    }
-
-  if (lops->closedir != NULL)
-    {
-      lops->closedir(uml->um_node, dir);
-    }
-
-  ret = idx == count ? OK : -EIO;
-
-  /* 流已关 —— 现在才逐项上移 */
 
   for (idx = 0; ret >= 0 && idx < count; idx++)
     {
@@ -1350,6 +1391,119 @@ static int unionfs_copyup_tree(FAR struct unionfs_inode_s *ui,
         }
 
       ret = unionfs_copyup_item(ui, child);
+      fs_heap_free(child);
+    }
+
+  fs_heap_free(names);
+  return ret;
+}
+
+/****************************************************************************
+ * Name: unionfs_copyup_missing_tree
+ *
+ * Description:
+ *   [ORT §116] 合并态目录 rename 的**只补缺项**上移：上层目录已存在
+ *   （有 shadow），下层同名目录里可能有尚未上移的子项。逐项：
+ *   · 下层项被上层白障/opq 遮蔽（lowerhidden）→ 跳过（不复活删除项）；
+ *   · 上层已有同名（文件/链接/目录）→ 保留上层（shadow 优先）；
+ *     **两者都是目录且上层非 opq** 时继续往下只补缺项；
+ *   · 上层没有 → copyup_item 整项上移（目录 = 整树复制）。
+ *   调用者随后做上层 rename + 旧名白障 —— 新视图 = 合并内容全在。
+ *   只补缺项，绝不覆盖上层已有内容（rename 不能丢 shadow）。
+ ****************************************************************************/
+
+static int unionfs_copyup_missing_tree(FAR struct unionfs_inode_s *ui,
+                                       FAR const char *relpath)
+{
+  FAR struct unionfs_mountpt_s *umu = &ui->ui_fs[0];
+  FAR struct unionfs_mountpt_s *uml = &ui->ui_fs[1];
+  FAR char *names;
+  char buf[128];
+  struct stat lst;
+  struct stat ust;
+  int count;
+  int idx;
+  int ret;
+
+  ret = unionfs_lower_names(ui, relpath, &names, &count);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (count == 0)
+    {
+      return OK;
+    }
+
+  for (idx = 0; ret >= 0 && idx < count; idx++)
+    {
+      FAR char *child = unionfs_relpath(relpath,
+                                        names + (size_t)idx * (NAME_MAX + 1));
+      bool lowerlink;
+      bool upperlink = false;
+      int ur;
+
+      if (child == NULL)
+        {
+          ret = -ENOMEM;
+          break;
+        }
+
+      /* 上层白障/opq 遮蔽的 lower 项不复活 */
+
+      if (unionfs_lowerhidden(ui, child))
+        {
+          fs_heap_free(child);
+          continue;
+        }
+
+      /* 下层项类型（链接优先；stat 会跟随） */
+
+      lowerlink = (unionfs_tryreadlink(uml->um_node, child, uml->um_prefix,
+                                       buf, sizeof(buf)) >= 0);
+      if (!lowerlink)
+        {
+          ret = unionfs_trystat(uml->um_node, child, uml->um_prefix, &lst);
+          if (ret < 0)
+            {
+              fs_heap_free(child);
+              continue;   /* 下层项消失：没东西可补 */
+            }
+        }
+
+      /* 上层是否已有同名 */
+
+      if (unionfs_tryreadlink(umu->um_node, child, umu->um_prefix,
+                              buf, sizeof(buf)) >= 0)
+        {
+          upperlink = true;
+          ur = 0;
+        }
+      else
+        {
+          ur = unionfs_trystat(umu->um_node, child, umu->um_prefix, &ust);
+        }
+
+      if (upperlink || ur >= 0)
+        {
+          /* 上层已有：shadow 优先；仅当两边都是真目录且上层非 opq
+           * 才继续往下只补缺项。 */
+
+          if (!upperlink && !lowerlink &&
+              S_ISDIR(lst.st_mode) && S_ISDIR(ust.st_mode) &&
+              !unionfs_isopaque(ui, child))
+            {
+              ret = unionfs_copyup_missing_tree(ui, child);
+            }
+        }
+      else
+        {
+          /* 上层没有：整项上移（目录 = 整树复制） */
+
+          ret = unionfs_copyup_item(ui, child);
+        }
+
       fs_heap_free(child);
     }
 
@@ -3607,17 +3761,22 @@ static int unionfs_rename(FAR struct inode *mountpt,
   lst    = unionfs_trystat(um->um_node, oldrelpath, um->um_prefix, &lst_st);
   whited = unionfs_lowerhidden(ui, oldrelpath);
 
-  /* [§110] 上层目录存在且下层同名也在（视图 = 合并态）：普通上层
-   * rename 会把"只在下层、尚未上移"的子项留在旧名（随后被白障）而
-   * 新名缺失 —— 静默丢内容。merge-copy 未实现（原型边界）→
-   * fail-closed。opq 目录整体屏蔽下层内容，不属合并态，放行。 */
+  /* [§110/§116] 上层目录存在且下层同名也是目录（视图 = 合并态）：
+   * 普通上层 rename 会把"只在下层、尚未上移"的子项留在旧名（随后被
+   * 白障）而新名缺失 —— 静默丢内容。§116 起先做**只补缺项**的合并
+   * 上移（shadow 优先、白障感知），随后普通上层 rename + 旧名白障即
+   * 完整。opq 目录整体屏蔽下层内容，不属合并态，放行。 */
 
   if (ust >= 0 && lst >= 0 && S_ISDIR(ust_st.st_mode) &&
-      !unionfs_isopaque(ui, oldrelpath))
+      S_ISDIR(lst_st.st_mode) && !unionfs_isopaque(ui, oldrelpath))
     {
-      _alert("ORT: unionfs rename unsupported (merged dir): %s\n",
-             oldrelpath);
-      return -ENOTSUP;
+      _alert("ORT: unionfs merge-copy: %s\n", oldrelpath);
+
+      ret = unionfs_copyup_missing_tree(ui, oldrelpath);
+      if (ret < 0)
+        {
+          return ret;
+        }
     }
 
   if (ust < 0)
