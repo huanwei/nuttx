@@ -34,8 +34,10 @@
 #include <errno.h>
 
 #include <nuttx/debug.h>
+#include <nuttx/kmalloc.h>
 #include <nuttx/mqueue.h>
 #include <nuttx/sched.h>
+#include <nuttx/wqueue.h>
 
 #include "sched/sched.h"     /* [§106] this_task() 在内部头（同 fs_open.c） */
 #include "inode/inode.h"
@@ -355,4 +357,69 @@ int nxmq_purge_prefix(FAR const char *prefix)
     }
 
   return n;
+}
+
+/****************************************************************************
+ * Name: nxmq_purge_ns_async
+ *
+ * Description:
+ *   [ORT §115] 实例死亡时异步回收其 mqueue 命名空间（见头文件说明）。
+ *   用 LPWORK：组销毁上下文（group_drop）不做 fs 工作；工作项自带
+ *   nsid，nsid 单调不复用 ⇒ 清理不会碰到新实例。
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_SCHED_LPWORK
+struct nxmq_purge_ns_s
+{
+  struct work_s work;
+  uint32_t nsid;
+};
+
+static void nxmq_purge_ns_worker(FAR void *arg)
+{
+  FAR struct nxmq_purge_ns_s *p = (FAR struct nxmq_purge_ns_s *)arg;
+  char prefix[32];
+
+  snprintf(prefix, sizeof(prefix), "ort.n%u.", (unsigned)p->nsid);
+  nxmq_purge_prefix(prefix);
+  kmm_free(p);
+}
+#endif
+
+int nxmq_purge_ns_async(uint32_t nsid)
+{
+#ifdef CONFIG_SCHED_LPWORK
+  FAR struct nxmq_purge_ns_s *p;
+  int ret;
+
+  if (nsid == 0)
+    {
+      return OK;
+    }
+
+  p = kmm_malloc(sizeof(*p));
+  if (p == NULL)
+    {
+      _alert("ORT: mqueue ns purge alloc failed: ort.n%u.\n",
+             (unsigned)nsid);
+      return -ENOMEM;
+    }
+
+  memset(p, 0, sizeof(*p));
+  p->nsid = nsid;
+
+  ret = work_queue(LPWORK, &p->work, nxmq_purge_ns_worker, p, 0);
+  if (ret < 0)
+    {
+      _alert("ORT: mqueue ns purge queue failed: ort.n%u. (%d)\n",
+             (unsigned)nsid, ret);
+      kmm_free(p);
+    }
+
+  return ret;
+#else
+  UNUSED(nsid);
+  return -ENOSYS;
+#endif
 }

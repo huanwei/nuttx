@@ -170,16 +170,21 @@ uint32_t ort_pidns_join(uint32_t nsid)
  * Description:
  *   组离开命名空间（组销毁时）。最后一个引用离开即回收实例。
  *
+ * Returned Value:
+ *   true = 本调用释放了实例的**最后一个**引用（[§115] 调用者可据此
+ *   回收该实例的 mqueue 命名空间）；false = 还有别的组在实例内。
+ *
  ****************************************************************************/
 
-void ort_pidns_put(uint32_t nsid)
+bool ort_pidns_put(uint32_t nsid)
 {
   irqstate_t flags;
+  bool last = false;
   int i;
 
   if (nsid == 0)
     {
-      return;
+      return false;
     }
 
   flags = enter_critical_section();
@@ -193,6 +198,7 @@ void ort_pidns_put(uint32_t nsid)
             {
               g_ort_pidns[i].pd_used = false;
               g_ort_pidns[i].pd_next = 0;
+              last = true;
             }
 
           break;
@@ -200,6 +206,7 @@ void ort_pidns_put(uint32_t nsid)
     }
 
   leave_critical_section(flags);
+  return last;
 }
 
 /****************************************************************************

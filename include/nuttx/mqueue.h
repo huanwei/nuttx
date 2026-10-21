@@ -528,6 +528,21 @@ int file_mq_unlink(FAR const char *mq_name);
 int nxmq_purge_prefix(FAR const char *prefix);
 
 /****************************************************************************
+ * Name: nxmq_purge_ns_async
+ *
+ * Description:
+ *   [ORT §115] 实例死亡（pidns 最后一个引用）时，异步（LPWORK）清理该
+ *   实例的 mqueue 命名空间 `ort.n<nsid>.`。nsid 单调不复用，故清理不会
+ *   误伤新实例；组销毁上下文不做 fs 工作。
+ *
+ * Returned Value:
+ *   OK / 负 errno（入队或分配失败 → 本次泄漏，打 alert）。
+ *
+ ****************************************************************************/
+
+int nxmq_purge_ns_async(uint32_t nsid);
+
+/****************************************************************************
  * Name: file_mq_send
  *
  * Description:

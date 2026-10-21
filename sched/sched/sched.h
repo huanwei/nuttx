@@ -613,7 +613,7 @@ static inline_function int nxsched_select_cpu(cpu_set_t affinity)
  * 成员派生=加入父实例。 */
 uint32_t ort_pidns_new(FAR uint32_t *nsid_out);
 uint32_t ort_pidns_join(uint32_t nsid);
-void     ort_pidns_put(uint32_t nsid);
+bool     ort_pidns_put(uint32_t nsid);   /* [§115] true = 实例最后一个引用 */
 pid_t    ort_pid_resolve(pid_t pid);
 
 /* [ORT §99] 号回传本地化（spawn 活体查表 / waitpid 见证号） */

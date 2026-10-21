@@ -33,6 +33,7 @@
 #include <nuttx/debug.h>
 #include <nuttx/irq.h>
 #include <nuttx/fs/fs.h>
+#include <nuttx/mqueue.h>
 #include <nuttx/net/net.h>
 #include <nuttx/sched.h>
 #include <nuttx/spinlock.h>
@@ -286,7 +287,18 @@ void group_drop(FAR struct task_group_s *group)
 
           if (group->tg_ort_lpid != 0)
             {
-              ort_pidns_put(group->tg_ort_nsid);   /* [§98/§102] 先退命名空间 */
+              /* [§115] 最后一个引用离开 = 实例死亡 → 异步回收其 mqueue
+               * 命名空间（ort.n<nsid>.）。组销毁上下文不做 fs 工作，
+               * 交给 LPWORK；nsid 单调不复用，清理无跨实例误伤。 */
+
+              bool last = ort_pidns_put(group->tg_ort_nsid);
+
+#ifndef CONFIG_DISABLE_MQUEUE
+              if (last)
+                {
+                  (void)nxmq_purge_ns_async(group->tg_ort_nsid);
+                }
+#endif
             }
 
           kmm_free(group->tg_ort_root);
