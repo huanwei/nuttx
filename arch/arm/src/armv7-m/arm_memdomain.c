@@ -155,6 +155,16 @@ static void ort_memdomain_lazyinit(void)
 
 uint32_t ort_caps(void)
 {
+  /* [§120] **不**申报 ORT_CAP_DOMAIN_OVERLAP：
+   *
+   *   M 的 mqueue 域键命名空间（ort.d<enc>.）按域共享，§119 的
+   *   "一域一实例"闸在 refs≠0 时直接 -EBUSY。同域两个活实例不可能
+   *   安全共存 ⇒ 监督者必须在**创建接替者之前**拒绝热替换
+   *   （replace_cg），而不是等绑域失败。
+   *
+   *   这一位是"平台能不能重叠"的唯一权威；内核闸仍是最后防线。
+   */
+
   return ORT_CAP_FAULT_HANDLER;
 }
 

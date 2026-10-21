@@ -126,6 +126,10 @@ static void ort_memdomain_lazyinit(void)
 
 uint32_t ort_caps(void)
 {
+  /* [§120] 同 armv7-m：**不**申报 ORT_CAP_DOMAIN_OVERLAP ——
+   * 域键 IPC 命名空间按域共享 + §119 一域一实例闸 ⇒ 同域不能重叠。
+   * 监督者据此在创建接替者之前拒绝热替换。 */
+
   return ORT_CAP_FAULT_HANDLER;
 }
 
