@@ -3713,6 +3713,23 @@ static int unionfs_rmdir(FAR struct inode *mountpt, FAR const char *relpath)
 }
 
 /****************************************************************************
+ * Name: unionfs_pathwithin
+ *
+ * Description:
+ *   [§119] 按**路径分量**判断 path 是否位于 dir 之内（不含相等）。
+ *   纯字符串前缀会把 "dir" / "dir2" 误判成包含关系。relpath 已去掉
+ *   挂载点前缀，形如 "a/b"。
+ *
+ ****************************************************************************/
+
+static bool unionfs_pathwithin(FAR const char *dir, FAR const char *path)
+{
+  size_t len = strlen(dir);
+
+  return len > 0 && strncmp(dir, path, len) == 0 && path[len] == '/';
+}
+
+/****************************************************************************
  * Name: unionfs_rename
  ****************************************************************************/
 
@@ -3724,9 +3741,20 @@ static int unionfs_rename(FAR struct inode *mountpt,
   FAR struct unionfs_mountpt_s *um;
   struct stat ust_st;
   struct stat lst_st;
+  struct stat dst_st;
+  struct stat lnew_st;
+  char lbuf[2];
   int ust;
   int lst;
+  int dst;
+  int lnew;
   bool whited;
+  bool src_exists;
+  bool src_isdir;
+  bool dst_exists;
+  bool dst_isdir;
+  bool dst_upper;
+  bool lnew_isdir;
   int ret = -ENOENT;
 
   finfo("oldrelpath: %s newrelpath: %s\n", oldrelpath, newrelpath);
@@ -3769,13 +3797,132 @@ static int unionfs_rename(FAR struct inode *mountpt,
   lst    = unionfs_trystat(um->um_node, oldrelpath, um->um_prefix, &lst_st);
   whited = unionfs_lowerhidden(ui, oldrelpath);
 
+  /* ── [§119] POSIX 目的端语义 ────────────────────────────────────────
+   *
+   * rename(2) 对"目的端已存在"的类型规则（与 Linux 同）：
+   *   源是目录 + 目的端非目录      → ENOTDIR
+   *   源非目录 + 目的端是目录      → EISDIR
+   *   源是目录 + 目的端是非空目录  → ENOTEMPTY
+   *   新名位于旧名**之内**         → EINVAL（目录不能搬进自己的子树）
+   *
+   * ★ 全部按**视图**判定（上层优先、白障/opq 遮蔽下层）—— 用户看到
+   *   的是合并视图，不是任一镜像层。
+   * ★ 检查必须在任何写操作（merge-copy / copyup / mkparents）**之前**：
+   *   被拒绝的 rename 不能留下半截副作用。
+   * ★ 链接要先 readlink 识别：层 stat 可能跟随链接（hostfs），而
+   *   rename 改名的是**链接本身**。tmpfs 的 readlink 用 strlcpy，
+   *   1 字节缓冲截断也返回 OK —— 足够判"是链接"。
+   */
+
+  src_exists = false;
+  src_isdir  = false;
+
+  if (ust >= 0)
+    {
+      src_exists = true;
+      src_isdir  = S_ISDIR(ust_st.st_mode);
+
+      if (unionfs_tryreadlink(ui->ui_fs[0].um_node, oldrelpath,
+                              ui->ui_fs[0].um_prefix,
+                              lbuf, sizeof(lbuf)) >= 0)
+        {
+          src_isdir = false;
+        }
+    }
+  else if (lst >= 0 && !whited)
+    {
+      src_exists = true;
+      src_isdir  = S_ISDIR(lst_st.st_mode);
+
+      if (unionfs_tryreadlink(ui->ui_fs[1].um_node, oldrelpath,
+                              ui->ui_fs[1].um_prefix,
+                              lbuf, sizeof(lbuf)) >= 0)
+        {
+          src_isdir = false;
+        }
+    }
+
+  dst_exists = false;
+  dst_isdir  = false;
+  dst_upper  = false;
+  lnew_isdir = false;
+
+  um  = &ui->ui_fs[0];
+  dst = unionfs_trystat(um->um_node, newrelpath, um->um_prefix, &dst_st);
+  if (dst >= 0)
+    {
+      dst_exists = true;
+      dst_upper  = true;
+      dst_isdir  = S_ISDIR(dst_st.st_mode);
+
+      if (unionfs_tryreadlink(um->um_node, newrelpath, um->um_prefix,
+                              lbuf, sizeof(lbuf)) >= 0)
+        {
+          dst_isdir = false;
+        }
+    }
+
+  /* 下层新名单独取一次：既用于"目的端仅在下层"的视图判定，也用于
+   * 改名后的 opq 决策（下层同名目录会与上层新目录**合并**）。 */
+
+  um   = &ui->ui_fs[1];
+  lnew = unionfs_trystat(um->um_node, newrelpath, um->um_prefix, &lnew_st);
+  if (lnew >= 0)
+    {
+      lnew_isdir = S_ISDIR(lnew_st.st_mode);
+
+      if (unionfs_tryreadlink(um->um_node, newrelpath, um->um_prefix,
+                              lbuf, sizeof(lbuf)) >= 0)
+        {
+          lnew_isdir = false;
+        }
+    }
+
+  if (!dst_exists && lnew >= 0 && !unionfs_lowerhidden(ui, newrelpath))
+    {
+      dst_exists = true;
+      dst_isdir  = lnew_isdir;
+    }
+
+  if (src_exists && src_isdir)
+    {
+      /* EINVAL 先判：这是"搬进自己的子树"，不能再当普通替换往下走。 */
+
+      if (unionfs_pathwithin(oldrelpath, newrelpath))
+        {
+          return -EINVAL;
+        }
+
+      if (dst_exists && !dst_isdir)
+        {
+          return -ENOTDIR;
+        }
+
+      if (dst_exists)
+        {
+          /* 视图空判定 —— 含"上层空、下层有内容被白障/opq 遮住" */
+
+          ret = unionfs_dirviewempty(ui, newrelpath);
+          if (ret < 0)
+            {
+              return ret;
+            }
+        }
+    }
+  else if (src_exists && !src_isdir && dst_exists && dst_isdir)
+    {
+      return -EISDIR;
+    }
+
   /* [§110/§116] 上层目录存在且下层同名也是目录（视图 = 合并态）：
    * 普通上层 rename 会把"只在下层、尚未上移"的子项留在旧名（随后被
    * 白障）而新名缺失 —— 静默丢内容。§116 起先做**只补缺项**的合并
    * 上移（shadow 优先、白障感知），随后普通上层 rename + 旧名白障即
-   * 完整。opq 目录整体屏蔽下层内容，不属合并态，放行。 */
+   * 完整。opq 目录整体屏蔽下层内容，不属合并态，放行。
+   * [§119] 视图源是链接时 stat 可能跟随成目录 —— 加了 src_isdir，
+   *        链接不走 merge-copy（改名的是链接本身）。 */
 
-  if (ust >= 0 && lst >= 0 && S_ISDIR(ust_st.st_mode) &&
+  if (ust >= 0 && lst >= 0 && src_isdir && S_ISDIR(ust_st.st_mode) &&
       S_ISDIR(lst_st.st_mode) && !unionfs_isopaque(ui, oldrelpath))
     {
       _alert("ORT: unionfs merge-copy: %s\n", oldrelpath);
@@ -3820,6 +3967,28 @@ static int unionfs_rename(FAR struct inode *mountpt,
       return ret;
     }
 
+  /* [§119] 目的端是**上层空目录**：POSIX 允许目录覆盖空目录，但 tmpfs
+   * 的 rename 不做替换（实测 -EEXIST）。视图已验空 ⇒ 上层物理只剩
+   * .wh.* 标记 —— 先清标记再 rmdir（与 rmdir 同序：tmpfs 视标记为
+   * 真文件，不清会 EBUSY），随后 rename 才能落到新名。
+   * 目的端仅在下层时空目录无需处理：上层 rename 会建出上层新名，
+   * 自然遮蔽/合并下层。 */
+
+  if (src_isdir && dst_exists && dst_isdir && dst_upper)
+    {
+      ret = unionfs_clearmarkers(ui, newrelpath);
+      if (ret >= 0)
+        {
+          um  = &ui->ui_fs[0];
+          ret = unionfs_tryrmdir(um->um_node, newrelpath, um->um_prefix);
+        }
+
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
   um  = &ui->ui_fs[0];
   ret = unionfs_tryrename(um->um_node, oldrelpath, newrelpath,
                           um->um_prefix);
@@ -3833,14 +4002,36 @@ static int unionfs_rename(FAR struct inode *mountpt,
 
   unionfs_dropmarker(ui, newrelpath);
 
-  /* 旧名下层同名仍在且未白障 → 补白障（否则改名后旧名"复活"）。 */
+  /* 旧名下层同名仍在且未白障 → 补白障（否则改名后旧名"复活"）。
+   * ★ 先于下面的 opq：opq 失败时源至少不会同时以两个名字可见。 */
 
   if (lst >= 0 && !whited)
     {
       ret = unionfs_mkmarker(ui, oldrelpath, false);
+      if (ret < 0)
+        {
+          return ret;
+        }
     }
 
-  return ret;
+  /* [§119] 目录改名的**合并渗漏**：下层在新名处若有同名目录，unionfs
+   * 会把两层合并 —— 目的端原先的内容、以及被白障/opq 遮住的下层
+   * 内容，会混进新目录。POSIX rename 的结果只应含源目录内容；
+   * 与 overlayfs 给改名目录打 opaque 的做法一致，这里给新名落 opq。
+   * （源目录本身已 opaque 时，标记随目录一起搬走，不必重复。）
+   * ★ 调用顺序与失败语义：rename 与旧名白障都已落定才做这一步；
+   *   它失败只报错（新名可能混入下层同名内容），不回滚已完成的改名。 */
+
+  if (src_isdir && lnew_isdir && !unionfs_isopaque(ui, newrelpath))
+    {
+      ret = unionfs_mkmarker(ui, newrelpath, true);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  return OK;
 }
 
 /****************************************************************************

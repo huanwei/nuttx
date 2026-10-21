@@ -152,6 +152,7 @@ int ort_container_bind(pid_t pid, int domain)
   FAR struct task_group_s *group;
   irqstate_t flags;
   bool was_bound;
+  bool reserved = false;
   uint8_t enc;
   int ret;
 
@@ -195,15 +196,35 @@ int ort_container_bind(pid_t pid, int domain)
 
   leave_critical_section(flags);
 
-  /* [§114] 新实例（尚未绑域）绑定前清旧实例的 mqueue 域键命名空间；
+  /* [§119] **一域一实例**：先认领域键命名空间（refs==0 → refs=1、
+   * gen++），再清旧实例的队列。认领失败（-EBUSY）= 域上还有活实例
+   * （现任，或尚未走完 group_drop 的前任）→ fail-closed，**不进
+   * §114 清理**：失败的动作不能清掉在位实例的队列。
+   *
+   * 顺序不能反：先清后认领的话，"绑定被拒"已经造成破坏（重叠替换
+   * 的现任会被清空 mqueue）。
+   *
+   * ★ 既然绑域认领了引用，后续任一失败路径都必须退引用（unref）；
+   *   成功路径由组销毁（group_drop）配对退引用。
+   *
+   * [§114] 新实例（尚未绑域）绑定前清旧实例的 mqueue 域键命名空间；
    * rebind 不动。清理走 fs，可能睡眠 —— 必须在临界区外。失败 →
    * fail-closed，不完成绑定。 */
 
   if (!was_bound)
     {
+      ret = ort_ipc_domain_bind(enc, true);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      reserved = true;
+
       ret = ort_ipc_purge_domain(domain);
       if (ret < 0)
         {
+          ort_ipc_domain_unref(enc);
           return ret;
         }
     }
@@ -216,6 +237,12 @@ int ort_container_bind(pid_t pid, int domain)
   if (tcb == NULL || tcb->group == NULL)
     {
       leave_critical_section(flags);
+
+      if (reserved)
+        {
+          ort_ipc_domain_unref(enc);
+        }
+
       return -ESRCH;
     }
 
@@ -226,15 +253,43 @@ int ort_container_bind(pid_t pid, int domain)
       tcb->group->tg_ort_domain != enc)
     {
       leave_critical_section(flags);
+
+      if (reserved)
+        {
+          ort_ipc_domain_unref(enc);
+        }
+
       return -EINVAL;
     }
 
   if (tcb->group->tg_ort_domain == 0)
     {
-      ort_ipc_domain_bind(enc);
-    }
+      /* 首次读之后组可能已换身份（残留 tcb 被回收）：当时没认领，
+       * 这里补认领（同样 fail-closed）。 */
 
-  tcb->group->tg_ort_domain = enc;
+      if (!reserved)
+        {
+          ret = ort_ipc_domain_bind(enc, true);
+          if (ret < 0)
+            {
+              leave_critical_section(flags);
+              return ret;
+            }
+
+          reserved = true;
+        }
+
+      tcb->group->tg_ort_domain = enc;
+    }
+  else if (reserved)
+    {
+      /* 组在这段窗口里已被别的绑域者绑到同域：我们多认领了一次，
+       * 退掉（这个组的引用归真正的绑定者）。 */
+
+      leave_critical_section(flags);
+      ort_ipc_domain_unref(enc);
+      return OK;
+    }
 
   leave_critical_section(flags);
   return OK;

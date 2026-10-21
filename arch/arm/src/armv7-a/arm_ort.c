@@ -392,7 +392,17 @@ int ort_container_bind(pid_t pid, int domain)
   flags = enter_critical_section();
   if (tcb->group->tg_ort_domain == 0)
     {
-      ort_ipc_domain_bind(enc);
+      /* [§119] A 侧显式传 exclusive=false：MMU 下容器 IPC 面按**每
+       * 实例 nsid** 命名空间隔离，域号只是部署标签；替换期两个实例
+       * 同域是设计内的**重叠替换**，并不共享 mqueue。M 侧（MPU）
+       * 的域键命名空间是按域共享的，才需要"一域一实例"的硬闸。 */
+
+      ret = ort_ipc_domain_bind(enc, false);
+      if (ret < 0)
+        {
+          leave_critical_section(flags);
+          return ret;
+        }
     }
   else if (tcb->group->tg_ort_domain != enc)
     {

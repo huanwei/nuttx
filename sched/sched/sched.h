@@ -623,9 +623,14 @@ void     ort_pidns_map_del(uint32_t nsid, uint32_t lnum, pid_t gpid);
 /* [§117] M 域键 IPC 命名空间生命周期：每域**组引用**（绑域/继承各 +1，
  * 组销毁 -1）；归零时 LPWORK 异步清 ort.d<enc>.。新绑定 gen++ 使延迟
  * worker 跳过（绑定自身的 §114 清理已清旧队）。enc = tg_ort_domain
- * （0 = 未绑；n>0 = 域 (n-1)）。 */
+ * （0 = 未绑；n>0 = 域 (n-1)）。
+ *
+ * [§119] exclusive = "一域一实例"闸（M）：域上已有活引用 → -EBUSY，
+ * 不认领、不 gen++、不清理，保留现场。A 传 false（域号只是标签，
+ * 容器 IPC 面按每实例 nsid 隔离，重叠替换安全）。返回 OK / -EBUSY /
+ * -EINVAL（enc==0）。 */
 
-void     ort_ipc_domain_bind(uint8_t enc);
+int      ort_ipc_domain_bind(uint8_t enc, bool exclusive);
 void     ort_ipc_domain_ref(uint8_t enc);
 void     ort_ipc_domain_unref(uint8_t enc);
 pid_t    ort_pid_resolve(pid_t pid);

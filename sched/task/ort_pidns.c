@@ -570,23 +570,49 @@ static void ort_ipc_domain_gc_worker(FAR void *arg)
   kmm_free(p);
 }
 
-void ort_ipc_domain_bind(uint8_t enc)
+int ort_ipc_domain_bind(uint8_t enc, bool exclusive)
 {
   irqstate_t flags;
+  int ret = OK;
 
   if (enc == 0)
     {
-      return;
+      return -EINVAL;
     }
 
   flags = enter_critical_section();
-  g_ipc_dom_gen[enc]++;
-  if (g_ipc_dom_refs[enc] < 0xffff)
+
+  /* [§119] M：**一域一实例**。域键命名空间 ort.d<enc>. 是按域共享的
+   * —— 同域两个活实例会互相看见、互相清理队列。那不是隔离，是串扰。
+   *
+   * 绑域 = 认领该域的命名空间：refs 非零（本实例的组，或 §113 派生
+   * 组，或尚未走完 group_drop 的前任）→ -EBUSY，fail-closed。
+   * **认领失败不改变任何状态**：不 gen++、不清队列 —— 失败的动作
+   * 不能伤到在位实例。调用者的 §114 清理必须排在认领**之后**。
+   *
+   * A 侧（exclusive=false）不开这个闸：MMU 下容器 IPC 面按每实例
+   * nsid 隔离，域号只是标签；替换期两个实例同域不共享 IPC 面。
+   * 这里保留原语义（引用 +1、代际 +1），供 §117 的归零 GC 配对。 */
+
+  if (exclusive && g_ipc_dom_refs[enc] != 0)
     {
-      g_ipc_dom_refs[enc]++;
+      ret = -EBUSY;
+    }
+  else
+    {
+      g_ipc_dom_gen[enc]++;
+      if (exclusive)
+        {
+          g_ipc_dom_refs[enc] = 1;
+        }
+      else if (g_ipc_dom_refs[enc] < 0xffff)
+        {
+          g_ipc_dom_refs[enc]++;
+        }
     }
 
   leave_critical_section(flags);
+  return ret;
 }
 
 void ort_ipc_domain_ref(uint8_t enc)
