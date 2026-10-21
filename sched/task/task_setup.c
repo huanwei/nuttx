@@ -125,6 +125,27 @@ retry:
 
       if (!g_pidhash[hash_ndx])
         {
+#ifdef CONFIG_ORT_CONTAINER
+          /* [A5/§108] 前提绊线：pid 必须**单调递增、死号不复用** ——
+           *   ORT 的槽位钉住、pid 归属、pid 翻译表全都建立在这条上。
+           *
+           *   上游当前实现 = g_lastpid+1（唯一插入点就是本文件），
+           *   走到这里时 next_pid 只可能因 2^31 回绕而不大于 g_lastpid。
+           *   若将来有人把分配改成"回收空号"，这里会**响亮失败**，
+           *   而不是让全部 pid 判据静默退化成权限继承缺陷（H28 族）。
+           *
+           *   panic 而不是降级：pid 分配的可预测性是安全前提，
+           *   失去它之后继续跑只会产生看似正常的错误判据。 */
+
+          if (next_pid <= g_lastpid)
+            {
+              _err("ORT: pid allocator is no longer monotonic "
+                   "(next=%d last=%d) — ORT pid judgments are invalid\n",
+                   next_pid, g_lastpid);
+              PANIC();
+            }
+#endif
+
           /* Assign this PID to the task */
 
           g_pidhash[hash_ndx] = tcb;
