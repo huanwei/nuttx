@@ -66,6 +66,8 @@
  ****************************************************************************/
 
 #define ORT_PIDNS_MAX     8       /* 同时存在的容器命名空间实例上限（原型） */
+#define ORT_PIDNS_MAP_MAX 128     /* [§118] 每实例 本地号→全局号 翻译表上界
+                                   *   （超出者解析回退活体扫描，见 resolve） */
 
 /****************************************************************************
  * Private Types
@@ -77,6 +79,7 @@ struct ort_pidns_s
   uint32_t pd_next;                     /* 下一个本地号（1 起） */
   uint16_t pd_refs;                     /* 引用（组数）计数 */
   bool     pd_used;
+  pid_t    pmap[ORT_PIDNS_MAP_MAX];     /* [§118] 本地号→全局号（0=空） */
 };
 
 /****************************************************************************
@@ -140,6 +143,7 @@ uint32_t ort_pidns_new(FAR uint32_t *nsid_out)
       g_ort_pidns[free].pd_used = true;
       g_ort_pidns[free].pd_nsid = ++g_ort_nsid_next;
       g_ort_pidns[free].pd_refs = 1;
+      memset(g_ort_pidns[free].pmap, 0, sizeof(g_ort_pidns[free].pmap));
       lpid = ++g_ort_pidns[free].pd_next;    /* 前置自增：0 是哨兵 */
       *nsid_out = g_ort_pidns[free].pd_nsid;
     }
@@ -218,6 +222,7 @@ bool ort_pidns_put(uint32_t nsid)
             {
               g_ort_pidns[i].pd_used = false;
               g_ort_pidns[i].pd_next = 0;
+              memset(g_ort_pidns[i].pmap, 0, sizeof(g_ort_pidns[i].pmap));
               last = true;
             }
 
@@ -227,6 +232,94 @@ bool ort_pidns_put(uint32_t nsid)
 
   leave_critical_section(flags);
   return last;
+}
+
+/****************************************************************************
+ * [§118] pid 翻译表：每实例 本地号 → 全局号
+ *
+ *   现有号面（信号三入口 / 调度入口 / pthread 句柄 / tgkill）的解析
+ *   不再依赖 PIDHASH 直扫：线程登记时入表、退出时删表，解析 O(1)。
+ *   本地号单调不复用（§98/§102），所以表项没有复用歧义；实例销毁时
+ *   清表（ort_pidns_put）。号 ≥ ORT_PIDNS_MAP_MAX 的极端情形解析回退
+ *   活体扫描（resolve 的后备路径，语义不变）。
+ ****************************************************************************/
+
+void ort_pidns_map_add(uint32_t nsid, uint32_t lnum, pid_t gpid)
+{
+  irqstate_t flags;
+  int i;
+
+  if (nsid == 0 || lnum == 0 || lnum >= ORT_PIDNS_MAP_MAX || gpid <= 0)
+    {
+      return;
+    }
+
+  flags = enter_critical_section();
+
+  for (i = 0; i < ORT_PIDNS_MAX; i++)
+    {
+      if (g_ort_pidns[i].pd_used && g_ort_pidns[i].pd_nsid == nsid)
+        {
+          g_ort_pidns[i].pmap[lnum] = gpid;
+          break;
+        }
+    }
+
+  leave_critical_section(flags);
+}
+
+void ort_pidns_map_del(uint32_t nsid, uint32_t lnum, pid_t gpid)
+{
+  irqstate_t flags;
+  int i;
+
+  if (nsid == 0 || lnum == 0 || lnum >= ORT_PIDNS_MAP_MAX)
+    {
+      return;
+    }
+
+  flags = enter_critical_section();
+
+  for (i = 0; i < ORT_PIDNS_MAX; i++)
+    {
+      if (g_ort_pidns[i].pd_used && g_ort_pidns[i].pd_nsid == nsid)
+        {
+          if (g_ort_pidns[i].pmap[lnum] == gpid)
+            {
+              g_ort_pidns[i].pmap[lnum] = 0;
+            }
+
+          break;
+        }
+    }
+
+  leave_critical_section(flags);
+}
+
+static pid_t ort_pidns_map_get(uint32_t nsid, uint32_t lnum)
+{
+  irqstate_t flags;
+  pid_t gpid = 0;
+  int i;
+
+  if (nsid == 0 || lnum == 0 || lnum >= ORT_PIDNS_MAP_MAX)
+    {
+      return 0;
+    }
+
+  flags = enter_critical_section();
+
+  for (i = 0; i < ORT_PIDNS_MAX; i++)
+    {
+      if (g_ort_pidns[i].pd_used && g_ort_pidns[i].pd_nsid == nsid)
+        {
+          gpid = g_ort_pidns[i].pmap[lnum];
+          break;
+        }
+    }
+
+  leave_critical_section(flags);
+  return gpid;
 }
 
 /****************************************************************************
@@ -300,6 +393,19 @@ pid_t ort_pid_resolve(pid_t pid)
     {
       return pid;                 /* 非容器成员：全局语义原样 */
     }
+
+  /* [§118] 翻译表优先（O(1)，线程登记/退出一对一维护） */
+
+  {
+    pid_t gpid = ort_pidns_map_get(rtcb->group->tg_ort_nsid,
+                                   (uint32_t)pid);
+    if (gpid != 0)
+      {
+        return gpid;
+      }
+  }
+
+  /* 后备：号 ≥ 表上界的极端情形按 PIDHASH 活体扫描（语义同前） */
 
   flags = enter_critical_section();
 

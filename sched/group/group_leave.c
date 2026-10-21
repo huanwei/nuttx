@@ -175,6 +175,15 @@ void group_leave(FAR struct tcb_s *tcb)
   group = tcb->group;
   if (group)
     {
+#ifdef CONFIG_ORT_CONTAINER
+      /* [§118] pid 翻译表删项（本地号单调不复用；只删匹配项）。 */
+
+      if (tcb->ort_ltid != 0)
+        {
+          ort_pidns_map_del(group->tg_ort_nsid, tcb->ort_ltid, tcb->pid);
+        }
+#endif
+
       /* Kernel threads share a single statically allocated g_kthread_group.
        * Never call group_release() for them: doing so would destroy shared
        * resources (mutex, fdlist, task_info) while other kernel threads are

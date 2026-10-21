@@ -615,6 +615,11 @@ uint32_t ort_pidns_new(FAR uint32_t *nsid_out);
 uint32_t ort_pidns_join(uint32_t nsid);
 bool     ort_pidns_put(uint32_t nsid);   /* [§115] true = 实例最后一个引用 */
 
+/* [§118] pid 翻译表：每实例 本地号→全局号（线程登记/退出时维护） */
+
+void     ort_pidns_map_add(uint32_t nsid, uint32_t lnum, pid_t gpid);
+void     ort_pidns_map_del(uint32_t nsid, uint32_t lnum, pid_t gpid);
+
 /* [§117] M 域键 IPC 命名空间生命周期：每域**组引用**（绑域/继承各 +1，
  * 组销毁 -1）；归零时 LPWORK 异步清 ort.d<enc>.。新绑定 gen++ 使延迟
  * worker 跳过（绑定自身的 §114 清理已清旧队）。enc = tg_ort_domain

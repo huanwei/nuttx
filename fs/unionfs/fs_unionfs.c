@@ -3750,6 +3750,14 @@ static int unionfs_rename(FAR struct inode *mountpt,
       return -EPERM;
     }
 
+  /* [§118] POSIX：同一路径的 rename = 无操作。若不特判，尾部的
+   * "旧名白障"会把源自己遮掉。 */
+
+  if (strcmp(oldrelpath, newrelpath) == 0)
+    {
+      return OK;
+    }
+
   /* 视图状态：上层有源？下层有源？白障？
    * ★ [§110] 探测从 trystatfile（**仅常规文件**）改为**通用 trystat** ——
    *   否则目录源被当"视图里没有"（-EISDIR），rename 目录永远 -ENOENT。

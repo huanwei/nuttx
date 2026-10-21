@@ -94,6 +94,14 @@ int tls_init_info(FAR struct tcb_s *tcb)
 
       info->tl_tid = tcb->ort_ltid != 0 ? (pid_t)tcb->ort_ltid
                                         : tcb->pid;
+
+      /* [§118] pid 翻译表登记：本地号 → 全局号（线程退出时删） */
+
+      if (tcb->ort_ltid != 0)
+        {
+          ort_pidns_map_add(tcb->group->tg_ort_nsid, tcb->ort_ltid,
+                            tcb->pid);
+        }
     }
   else
 #endif
