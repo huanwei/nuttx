@@ -310,6 +310,19 @@ int ort_container_domain(FAR struct task_group_s *group)
       return -1;
     }
 
+  /* [§121] 对外报**逻辑（服务）域**；物理块另有 getter。 */
+
+  return (int)(group->tg_ort_svcdomain != 0 ? group->tg_ort_svcdomain
+                                            : group->tg_ort_domain) - 1;
+}
+
+int ort_container_physdomain(FAR struct task_group_s *group)
+{
+  if (group == NULL || group->tg_ort_domain == 0)
+    {
+      return -1;
+    }
+
   return (int)group->tg_ort_domain - 1;
 }
 
@@ -329,11 +342,12 @@ int ort_container_domain(FAR struct task_group_s *group)
  *
  ****************************************************************************/
 
-int ort_container_bind(pid_t pid, int domain)
+int ort_container_bind(pid_t pid, int domain, int svcdomain)
 {
   FAR struct tcb_s *tcb;
   irqstate_t flags;
   uint8_t enc;
+  uint8_t senc;
   uint8_t old;
   int ret;
 
@@ -360,6 +374,18 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
+  /* [§121] 逻辑域：状态槽索引。旧接口（svcdomain < 0）取物理域。 */
+
+  if (svcdomain < 0)
+    {
+      svcdomain = domain;
+    }
+
+  if (svcdomain >= ORT_STATE_SLOTS)
+    {
+      return -EINVAL;
+    }
+
   /* ★ 域号在 ARMv7-A 上**不参与强制**（隔离由地址空间天然给出），
    *   但仍然要**记录**下来。为什么不能像原来那样返回 OK 就走：
    *
@@ -374,13 +400,16 @@ int ort_container_bind(pid_t pid, int domain)
    *   与 MPU 侧完全一致 —— 见 include/nuttx/sched.h 里那段说明。
    */
 
-  enc = (uint8_t)(domain + 1);
-  old = tcb->group->tg_ort_domain;
+  enc  = (uint8_t)(domain + 1);
+  senc = (uint8_t)(svcdomain + 1);
+  old  = tcb->group->tg_ort_domain;
 
   /* [§117] rebind 不允许换域（组引用/命名空间无法平衡）；同域 rebind
-   * 幂等。 */
+   * 幂等。[§121] 逻辑域也一并固定：换逻辑域 = 换状态身份。 */
 
-  if (old != 0 && old != enc)
+  if (old != 0 && (old != enc ||
+      (tcb->group->tg_ort_svcdomain != 0 &&
+       tcb->group->tg_ort_svcdomain != senc)))
     {
       return -EINVAL;
     }
@@ -403,10 +432,11 @@ int ort_container_bind(pid_t pid, int domain)
   flags = enter_critical_section();
   if (tcb->group->tg_ort_domain == 0)
     {
-      /* [§119] A 侧显式传 exclusive=false：MMU 下容器 IPC 面按**每
-       * 实例 nsid** 命名空间隔离，域号只是部署标签；替换期两个实例
-       * 同域是设计内的**重叠替换**，并不共享 mqueue。M 侧（MPU）
-       * 的域键命名空间是按域共享的，才需要"一域一实例"的硬闸。 */
+      /* [§119/§121] A 侧 exclusive=false：物理域只是一个标签/命名键，
+       * 没有独占的 MPU 块。unrooted 容器的 mqueue 域键按**物理域**
+       * 隔离 —— 监督者给重叠期的接替者分配**不同物理域**（§121），
+       * 因此两个实例的队列互不可见；rooted 容器另按 nsid 隔离。
+       * M 侧的物理域是独占内存块，§119 的硬闸保持不变。 */
 
       ret = ort_ipc_domain_bind(enc, false);
       if (ret < 0)
@@ -421,7 +451,8 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
-  tcb->group->tg_ort_domain = enc;
+  tcb->group->tg_ort_domain    = enc;
+  tcb->group->tg_ort_svcdomain = senc;
   leave_critical_section(flags);
   return OK;
 }

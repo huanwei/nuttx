@@ -62,6 +62,21 @@
  *
  ****************************************************************************/
 
+#ifdef CONFIG_ORT_CONTAINER
+/* [§121] 绑域成功后的准入唤醒（唯一出口）。
+ * 绑定只有一处"成功"的定义，唤醒也只该有一处 —— 旧接口与新接口共用。 */
+
+static void ort_admit_wake(pid_t pid)
+{
+  FAR struct tcb_s *target = nxsched_get_tcb(pid);
+
+  if (target != NULL && target->group != NULL)
+    {
+      nxsem_post(&target->group->tg_ort_admit);
+    }
+}
+#endif
+
 int prctl(int option, ...)
 {
   va_list ap;
@@ -96,7 +111,7 @@ int prctl(int option, ...)
 
           int domain = va_arg(ap, int);
           int pid    = va_arg(ap, int);
-          int ret    = ort_container_bind((pid_t)pid, domain);
+          int ret    = ort_container_bind((pid_t)pid, domain, domain);
 
           /* ── ③ 准入协议（2026-10-05，手册 §三·补五十）─────────────
            *
@@ -107,12 +122,28 @@ int prctl(int option, ...)
 
           if (ret == OK)
             {
-              FAR struct tcb_s *target = nxsched_get_tcb((pid_t)pid);
+              ort_admit_wake((pid_t)pid);
+            }
 
-              if (target != NULL && target->group != NULL)
-                {
-                  nxsem_post(&target->group->tg_ort_admit);
-                }
+          return ret;
+        }
+
+      case PR_SET_ORT_DOMAIN2:
+        {
+          /* [§121] 物理域 + 逻辑域两维绑定：
+           *   prctl(PR_SET_ORT_DOMAIN2, ORT_DOMAIN2_PACK(phys, svc), pid);
+           * 物理域 = 内存块/IPC 实例键；逻辑域 = 状态槽/部署身份。
+           * 打包原因见 <sys/prctl.h>（用户态 prctl 代理只转 2 个变参）。 */
+
+          int packed = va_arg(ap, int);
+          int pid    = va_arg(ap, int);
+          int ret             = ort_container_bind((pid_t)pid,
+                                                   ORT_DOMAIN2_PHYS(packed),
+                                                   ORT_DOMAIN2_SVC(packed));
+
+          if (ret == OK)
+            {
+              ort_admit_wake((pid_t)pid);
             }
 
           return ret;
@@ -127,6 +158,15 @@ int prctl(int option, ...)
            */
 
           return ort_container_domain(this_task()->group);
+        }
+
+      case PR_GET_ORT_PHYSDOMAIN:
+        {
+          /* [§121] 查询本容器的**物理块号**（域内存定位用）。
+           * 与 PR_GET_ORT_DOMAIN（逻辑域）分开：重叠期两者不同。
+           * 无权限要求：只读本组信息；知道块号也访问不了别的块。 */
+
+          return ort_container_physdomain(this_task()->group);
         }
 
       case PR_ORT_WAIT_ADMISSION:

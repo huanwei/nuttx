@@ -155,17 +155,21 @@ static void ort_memdomain_lazyinit(void)
 
 uint32_t ort_caps(void)
 {
-  /* [§120] **不**申报 ORT_CAP_DOMAIN_OVERLAP：
+  /* [§121] 申报 ORT_CAP_DOMAIN_OVERLAP：
    *
-   *   M 的 mqueue 域键命名空间（ort.d<enc>.）按域共享，§119 的
-   *   "一域一实例"闸在 refs≠0 时直接 -EBUSY。同域两个活实例不可能
-   *   安全共存 ⇒ 监督者必须在**创建接替者之前**拒绝热替换
-   *   （replace_cg），而不是等绑域失败。
+   *   物理域（MPU 块 + mqueue 域键）按**实例**分配 —— 热替换的接替者
+   *   拿一个不同的物理块，§119 的"一物理域一实例"闸不挡它；
+   *   逻辑（服务）域按 manifest 固定，状态槽/故障作废/部署对账共享。
    *
-   *   这一位是"平台能不能重叠"的唯一权威；内核闸仍是最后防线。
+   *   §120 的"拒绝热替换"闸仍留在监督者里，但它现在只在平台**没有**
+   *   这一位时触发（即未来某个不满足上述条件的端口）。
+   *
+   *   ⚠️ M 的**用户静态度量是全局共享的**（PROTECTED 共地址空间，
+   *   见 §三·补二十五）—— 物理块隔离不改变这一点；重叠期仍要求容器
+   *   不靠 static 保存实例私有状态。这一边界不因本能力位消失。
    */
 
-  return ORT_CAP_FAULT_HANDLER;
+  return ORT_CAP_FAULT_HANDLER | ORT_CAP_DOMAIN_OVERLAP;
 }
 
 /****************************************************************************
@@ -199,10 +203,23 @@ int ort_container_domain(FAR struct task_group_s *group)
       return -1;
     }
 
+  /* [§121] 对外报逻辑（服务）域；物理块另有 getter。 */
+
+  return ORT_DOMAIN_DECODE(group->tg_ort_svcdomain != 0 ?
+                           group->tg_ort_svcdomain : group->tg_ort_domain);
+}
+
+int ort_container_physdomain(FAR struct task_group_s *group)
+{
+  if (group == NULL || !ORT_DOMAIN_VALID(group->tg_ort_domain))
+    {
+      return -1;
+    }
+
   return ORT_DOMAIN_DECODE(group->tg_ort_domain);
 }
 
-int ort_container_bind(pid_t pid, int domain)
+int ort_container_bind(pid_t pid, int domain, int svcdomain)
 {
   FAR struct tcb_s *tcb;
   FAR struct task_group_s *group;
@@ -210,6 +227,7 @@ int ort_container_bind(pid_t pid, int domain)
   bool was_bound;
   bool reserved = false;
   uint8_t enc;
+  uint8_t senc;
   int ret;
 
   /* ★ 只有监督者能绑域。
@@ -267,7 +285,22 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
-  enc = (uint8_t)ORT_DOMAIN_ENCODE(domain);
+  /* [§121] 逻辑域 = 状态槽索引。旧接口（svcdomain < 0）取物理域。
+   * 逻辑域不参与 MPU 编程，只决定状态槽/部署身份。 */
+
+  if (svcdomain < 0)
+    {
+      svcdomain = domain;
+    }
+
+  if (svcdomain >= ORT_STATE_SLOTS)
+    {
+      leave_critical_section(flags);
+      return -EINVAL;
+    }
+
+  enc  = (uint8_t)ORT_DOMAIN_ENCODE(domain);
+  senc = (uint8_t)ORT_DOMAIN_ENCODE(svcdomain);
   was_bound = (group->tg_ort_domain != 0);
 
   leave_critical_section(flags);
@@ -326,7 +359,9 @@ int ort_container_bind(pid_t pid, int domain)
    * 同临界区完成，组销毁的 -1 才可能与 +1 配对）。 */
 
   if (tcb->group->tg_ort_domain != 0 &&
-      tcb->group->tg_ort_domain != enc)
+      (tcb->group->tg_ort_domain != enc ||
+       (tcb->group->tg_ort_svcdomain != 0 &&
+        tcb->group->tg_ort_svcdomain != senc)))
     {
       leave_critical_section(flags);
 
@@ -367,6 +402,7 @@ int ort_container_bind(pid_t pid, int domain)
       return OK;
     }
 
+  tcb->group->tg_ort_svcdomain = senc;
   leave_critical_section(flags);
   return OK;
 }

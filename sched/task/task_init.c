@@ -62,8 +62,9 @@ static int ort_inherit_container_attrs(FAR struct task_group_s *parent,
   irqstate_t flags;
 
   flags = enter_critical_section();
-  child->tg_ort_domain = parent->tg_ort_domain;
-  child->tg_ort_memcap = parent->tg_ort_memcap;
+  child->tg_ort_domain    = parent->tg_ort_domain;
+  child->tg_ort_svcdomain = parent->tg_ort_svcdomain;  /* [§121] 逻辑域 */
+  child->tg_ort_memcap    = parent->tg_ort_memcap;
   strlcpy(devbuf, parent->tg_ort_devwl != NULL ? parent->tg_ort_devwl : "",
           sizeof(devbuf));
   leave_critical_section(flags);

@@ -521,7 +521,16 @@ struct task_group_s
    *   域 n 存为 n+1；写入一律经 ort_container_bind()，不要直接赋值。
    */
 
-  uint8_t tg_ort_domain;            /* 0 = 未绑定；n>0 = 域 (n-1)           */
+  uint8_t tg_ort_domain;            /* [§121] **物理**域 n+1（0=未绑）：
+                                     *   MPU 内存块 + IPC 命名空间键 =
+                                     *   实例身份。热替换的接替者用
+                                     *   不同物理块 → 内存/IPC 不共享。 */
+  uint8_t tg_ort_svcdomain;         /* [§121] **逻辑（服务）域** n+1；
+                                     *   0 = 同物理域（旧绑定路径）。
+                                     *   状态槽/故障作废/部署对账按它 ——
+                                     *   热替换的接替者与现任**共享**
+                                     *   逻辑域（状态交接），物理域不同。
+                                     *   见 PR_SET_ORT_DOMAIN2。 */
   uint8_t tg_ort_faults;            /* 该容器累计的用户态 memfault 次数     */
   uint32_t tg_ort_memcap;           /* [§81] 本组拉起进程的堆上限（0=默认）
                                      *   消费点：libelf_addrenv_alloc

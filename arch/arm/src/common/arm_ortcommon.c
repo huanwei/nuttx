@@ -308,7 +308,12 @@ static int ort_state_slot(void)
       return -EPERM;
     }
 
-  domain = (int)group->tg_ort_domain - 1;
+  /* [§121] 状态槽按**逻辑（服务）域**索引 —— 热替换的接替者与现任
+   * 物理块不同，但共享同一逻辑域：接替者才能读到现任发布的状态。
+   * 旧绑定路径 tg_ort_svcdomain == 0 → 回落到物理域（原语义）。 */
+
+  domain = (int)(group->tg_ort_svcdomain != 0 ? group->tg_ort_svcdomain
+                                              : group->tg_ort_domain) - 1;
   if (domain < 0 || domain >= ORT_STATE_SLOTS)
     {
       return -ERANGE;
@@ -1058,7 +1063,11 @@ void ort_fault_notify(pid_t victim, uintptr_t pc, uintptr_t addr,
 
       if (vtcb != NULL && vtcb->group != NULL)
         {
-          ort_state_invalidate((int)vtcb->group->tg_ort_domain - 1);
+          /* [§121] 状态槽按逻辑域作废（重叠期的两个实例共享它） */
+
+          ort_state_invalidate((int)(vtcb->group->tg_ort_svcdomain != 0 ?
+                                     vtcb->group->tg_ort_svcdomain :
+                                     vtcb->group->tg_ort_domain) - 1);
         }
     }
 

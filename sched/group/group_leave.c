@@ -222,8 +222,13 @@ void group_leave(FAR struct tcb_s *tcb)
 
           if (group->tg_ort_domain != 0 && group->tg_ort_faults == 0)
             {
+              /* [§121] 事件里的域是**逻辑域**（状态槽/部署身份）；
+               * 物理块是实例私有的，接替者会换。 */
+
               ort_group_exit_notify((pid_t)group->tg_pid,
-                                    (uint8_t)group->tg_ort_domain,
+                                    (uint8_t)(group->tg_ort_svcdomain != 0 ?
+                                              group->tg_ort_svcdomain :
+                                              group->tg_ort_domain),
                                     group->tg_ort_exitcode,
                                     (uint32_t)group->tg_ort_ready);
             }

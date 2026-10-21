@@ -94,6 +94,47 @@
  */
 #define PR_SET_ORT_DOMAIN 7
 
+/* [§121] 绑定容器到「物理域 + 逻辑域」两维身份（prototype）
+ *
+ *   prctl(PR_SET_ORT_DOMAIN2, ORT_DOMAIN2_PACK(domain, svcdomain), pid);
+ *
+ *   domain    = **物理**域：MPU 内存块 + 域键 IPC 命名空间（实例身份）
+ *   svcdomain = **逻辑（服务）域**：状态槽索引、故障作废、部署对账
+ *
+ * ★ 为什么需要两维：热替换的接替者必须
+ *     - 有自己的内存块与 IPC 命名空间（否则与现任串扰）→ 不同 domain；
+ *     - 读/写同一个状态槽、对部署方仍是同一个服务 → 同一 svcdomain。
+ *   旧接口 PR_SET_ORT_DOMAIN 等价于 svcdomain = domain（保持原语义）。
+ *
+ * ★ 为什么打包成一个参数：用户态 prctl 代理只转发 2 个变参
+ *   （syscall.csv：int,int,"...",uintptr_t,uintptr_t）。改 syscall 表
+ *   会牵动全部用户 ELF 的重建；两个域号各 8 位足够，打包零成本。
+ *
+ * ★ 一物理域一实例仍由内核闸（ort_ipc_domain_bind, exclusive）保证；
+ *   同一 svcdomain 允许多个物理域（重叠期），状态槽按逻辑域共享。
+ * ★ 只有 ORT 监督者能调用；其它调用者 -EPERM。
+ */
+#define PR_SET_ORT_DOMAIN2 36
+
+#define ORT_DOMAIN2_PACK(d, s)  ((((unsigned)(d)) & 0xffu) | \
+                                 ((((unsigned)(s)) & 0xffu) << 8))
+#define ORT_DOMAIN2_PHYS(p)     ((int)((p) & 0xffu))
+#define ORT_DOMAIN2_SVC(p)      ((int)(((p) >> 8) & 0xffu))
+
+/* [§121] 查询本容器所在的**物理**块号（prototype）
+ *
+ *   prctl(PR_GET_ORT_PHYSDOMAIN);
+ *       返回物理域号；未绑定返回 -1
+ *
+ * 与 PR_GET_ORT_DOMAIN 的分工：
+ *   PR_GET_ORT_DOMAIN      = 逻辑（服务）域 —— 部署身份，跨替换不变；
+ *   PR_GET_ORT_PHYSDOMAIN  = 物理块 —— 只用于定位本实例的域内存块
+ *                            （ORT_DOMAIN_POOL_BASE + phys × BLOCK_SIZE）。
+ * ★ 容器**不能**据此访问别的块：MPU 只放行自己的块（访问别的块照样
+ *   fault）。它只是"我的内存在哪"的只读信息。
+ */
+#define PR_GET_ORT_PHYSDOMAIN 37
+
 /* [ORT] 查询本容器绑定的域（prototype）
  *
  *   prctl(PR_GET_ORT_DOMAIN);

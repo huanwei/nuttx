@@ -37,9 +37,12 @@
 
 struct task_group_s;
 
-/* 把指定容器绑定到域。只有监督者能调用，否则 -EPERM。 */
+/* 把指定容器绑定到域。只有监督者能调用，否则 -EPERM。
+ *   domain    = 物理域（MPU 块 + IPC 命名空间键）
+ *   svcdomain = 逻辑/服务域（状态槽/部署身份）；<0 时取 domain（旧语义）。
+ */
 
-int ort_container_bind(pid_t pid, int domain);
+int ort_container_bind(pid_t pid, int domain, int svcdomain);
 
 /* [§104] 设备白名单下发：入参是**用户指针**（内部 copyin + 换名）。
  * 只有监督者能调用，否则 -EPERM；空串 = 清空（全拒绝）。 */
@@ -52,9 +55,13 @@ int ort_devwl_set(pid_t pid, FAR const char *userlist);
 int ort_sup_beat(void);
 int ort_sup_wdstop(void);
 
-/* 查询容器的域。未绑定返回 -1。 */
+/* 查询容器的**逻辑（服务）域**。未绑定返回 -1。 */
 
 int ort_container_domain(FAR struct task_group_s *group);
+
+/* [§121] 查询容器的**物理**域（块号）。未绑定返回 -1。 */
+
+int ort_container_physdomain(FAR struct task_group_s *group);
 
 /* 监督者槽位：首次注册即钉住（且登录名需在构建期白名单内 —— 见
  * task_prctl.c 的资格检查），之后别的任务一律 -EBUSY。 */
@@ -63,7 +70,8 @@ int ort_supervisor_set(pid_t pid);
 
 /* 容器组正常退出通知（kind=EXIT 事件）。
  *   pid        = 容器组 pid
- *   ort_domain = 组绑定的域（**原始编码**：tg_ort_domain，域 n 存为 n+1）
+ *   ort_domain = 组的**逻辑域**（原始编码：tg_ort_svcdomain，缺省同
+ *                tg_ort_domain；域 n 存为 n+1）—— 状态槽按它作废
  *   code       = 退出码
  *   ready      = [§105] 退出**时刻**的就绪位（调用者 group_leave 当场取 ——
  *                此刻受害者 tcb 可能已亡，不能在记录函数里现查）

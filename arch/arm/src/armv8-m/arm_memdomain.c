@@ -126,11 +126,10 @@ static void ort_memdomain_lazyinit(void)
 
 uint32_t ort_caps(void)
 {
-  /* [§120] 同 armv7-m：**不**申报 ORT_CAP_DOMAIN_OVERLAP ——
-   * 域键 IPC 命名空间按域共享 + §119 一域一实例闸 ⇒ 同域不能重叠。
-   * 监督者据此在创建接替者之前拒绝热替换。 */
+  /* [§121] 同 armv7-m：申报 DOMAIN_OVERLAP（物理域按实例分配、
+   * 逻辑域共享）。用户静态量全局共享的边界不因本能力位消失。 */
 
-  return ORT_CAP_FAULT_HANDLER;
+  return ORT_CAP_FAULT_HANDLER | ORT_CAP_DOMAIN_OVERLAP;
 }
 
 /* 容量 = 池块数（手册 §三·补五十四）—— 与 armv7-m 同义。 */
@@ -147,10 +146,23 @@ int ort_container_domain(FAR struct task_group_s *group)
       return -1;
     }
 
+  /* [§121] 对外报逻辑（服务）域；物理块另有 getter。 */
+
+  return ORT_DOMAIN_DECODE(group->tg_ort_svcdomain != 0 ?
+                           group->tg_ort_svcdomain : group->tg_ort_domain);
+}
+
+int ort_container_physdomain(FAR struct task_group_s *group)
+{
+  if (group == NULL || !ORT_DOMAIN_VALID(group->tg_ort_domain))
+    {
+      return -1;
+    }
+
   return ORT_DOMAIN_DECODE(group->tg_ort_domain);
 }
 
-int ort_container_bind(pid_t pid, int domain)
+int ort_container_bind(pid_t pid, int domain, int svcdomain)
 {
   FAR struct tcb_s *tcb;
   FAR struct task_group_s *group;
@@ -158,6 +170,7 @@ int ort_container_bind(pid_t pid, int domain)
   bool was_bound;
   bool reserved = false;
   uint8_t enc;
+  uint8_t senc;
   int ret;
 
   /* 只有监督者能绑域 —— 域号就是内存块号，容器能自选就能选到别人的块 */
@@ -195,7 +208,21 @@ int ort_container_bind(pid_t pid, int domain)
       return -EINVAL;
     }
 
-  enc = (uint8_t)ORT_DOMAIN_ENCODE(domain);
+  /* [§121] 逻辑域 = 状态槽索引；旧接口（svcdomain < 0）取物理域。 */
+
+  if (svcdomain < 0)
+    {
+      svcdomain = domain;
+    }
+
+  if (svcdomain >= ORT_STATE_SLOTS)
+    {
+      leave_critical_section(flags);
+      return -EINVAL;
+    }
+
+  enc  = (uint8_t)ORT_DOMAIN_ENCODE(domain);
+  senc = (uint8_t)ORT_DOMAIN_ENCODE(svcdomain);
   was_bound = (group->tg_ort_domain != 0);
 
   leave_critical_section(flags);
@@ -254,7 +281,9 @@ int ort_container_bind(pid_t pid, int domain)
    * 同临界区完成，组销毁的 -1 才可能与 +1 配对）。 */
 
   if (tcb->group->tg_ort_domain != 0 &&
-      tcb->group->tg_ort_domain != enc)
+      (tcb->group->tg_ort_domain != enc ||
+       (tcb->group->tg_ort_svcdomain != 0 &&
+        tcb->group->tg_ort_svcdomain != senc)))
     {
       leave_critical_section(flags);
 
@@ -295,6 +324,7 @@ int ort_container_bind(pid_t pid, int domain)
       return OK;
     }
 
+  tcb->group->tg_ort_svcdomain = senc;
   leave_critical_section(flags);
   return OK;
 }
